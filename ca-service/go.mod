@@ -1,8 +1,7 @@
 module pqcpki/ca-service
 
-go 1.23.6
+go 1.20
 
-toolchain go1.24.2
 
 require (
 	github.com/ThalesGroup/crypto11 v1.4.1
