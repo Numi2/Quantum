@@ -1,6 +1,6 @@
 module github.com/yourorg/transparency-log-service
 
-go 1.20
+go 1.24.2
 
 require (
 	github.com/go-chi/chi/v5 v5.0.7

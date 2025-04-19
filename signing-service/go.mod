@@ -1,8 +1,8 @@
 module pqcpki/signing-service
 
-go 1.24
+go 1.24.2
 
-toolchain go1.24
+toolchain go1.24.2
 
 require (
 	github.com/ThalesGroup/crypto11 v1.4.1

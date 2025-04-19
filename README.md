@@ -8,7 +8,7 @@ This repository contains a PQC-backed ACME server and a CA service in Go.
 - `ca-service`: Signs CSRs with a generated ECDSA P-256 CA root key and returns a PEM certificate chain.
 +
 ## Prerequisites
-- Go 1.20+
+- Go 1.24.2+
 - PostgreSQL or CockroachDB (for ACME server state)
 - Docker (optional)
 +
