@@ -1,6 +1,6 @@
 module pqcpki/ca-service
 
-go 1.20
+go 1.24.2
 
 
 require (
