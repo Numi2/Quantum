@@ -339,7 +339,7 @@ func main() {
 		tlsCert.OCSPStaple = staple
 	}
 	// setup HTTPS client to talk to CA service with mTLS
-	caCertPEM, err := os.ReadFile(caCertFile)
+	caCertPEM, err = os.ReadFile(caCertFile)
 	if err != nil {
 		log.Fatalf("read CA cert: %v", err)
 	}
