@@ -58,7 +58,8 @@ func (s *FSKeyStore) GetPrivateKey(id string) (crypto.PrivateKey, error) {
 	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		// fallback to EC private key
-		if ec, err2 := x509.ParseECPrivateKey(block.Bytes); err2 == nil {
+		ec, err2 := x509.ParseECPrivateKey(block.Bytes)
+		if err2 == nil {
 			return ec, nil
 		}
 		return nil, fmt.Errorf("parse private key: %v, %v", err, err2)
