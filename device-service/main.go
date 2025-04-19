@@ -8,7 +8,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
+   "log"
+   "sync"
+   "time"
 	"net/http"
 	"os"
 )
@@ -19,7 +21,8 @@ const addr = ":6000"
 var (
 	apiKey    string
 	caSignURL string
-	devices   = make(map[string]string)
+   devices   = make(map[string]string)
+   devicesMu sync.Mutex
 )
 
 func main() {
@@ -32,10 +35,18 @@ func main() {
 		caSignURL = "http://localhost:5000/sign"
 	}
 
-	http.HandleFunc("/v1/devices", auth(provisionHandler))
+   mux := http.NewServeMux()
+   mux.HandleFunc("/v1/devices", auth(provisionHandler))
 
-	log.Printf("Device Provisioning Service started on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+   server := &http.Server{
+       Addr:         addr,
+       Handler:      mux,
+       ReadTimeout:  5 * time.Second,
+       WriteTimeout: 10 * time.Second,
+       IdleTimeout:  120 * time.Second,
+   }
+   log.Printf("Device Provisioning Service started on %s", addr)
+   log.Fatal(server.ListenAndServe())
 }
 
 // auth enforces X-API-Key header
@@ -51,11 +62,12 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 
 // provisionHandler processes a CSR and returns a device certificate chain
 func provisionHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+   if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct {
+   defer r.Body.Close()
+   var req struct {
 		CSR string `json:"csr"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -69,7 +81,8 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var pemBuf bytes.Buffer
 	pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	resp, err := http.Post(caSignURL, "application/x-pem-file", &pemBuf)
+   client := &http.Client{Timeout: 10 * time.Second}
+   resp, err := client.Post(caSignURL, "application/x-pem-file", &pemBuf)
 	if err != nil {
 		http.Error(w, "failed to call CA service", http.StatusInternalServerError)
 		return
@@ -90,7 +103,9 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to generate device ID", http.StatusInternalServerError)
 		return
 	}
-	devices[deviceID] = string(certChain)
+   devicesMu.Lock()
+   devices[deviceID] = string(certChain)
+   devicesMu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{

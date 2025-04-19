@@ -153,16 +153,20 @@ func main() {
 	// start HTTPS server with mTLS support
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
-	tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw, caCert.Raw}, PrivateKey: tlsKey}
-	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    pool,
-			MinVersion:   tls.VersionTLS12,
-			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+   // build TLS certificate for server using CA cert and key
+   tlsCert := tls.Certificate{Certificate: [][]byte{caCert.Raw}, PrivateKey: caKey}
+   server := &http.Server{
+       Addr:         addr,
+       Handler:      mux,
+       ReadTimeout:  5 * time.Second,
+       WriteTimeout: 10 * time.Second,
+       IdleTimeout:  120 * time.Second,
+       TLSConfig: &tls.Config{
+           Certificates: []tls.Certificate{tlsCert},
+           ClientAuth:   tls.RequireAndVerifyClientCert,
+           ClientCAs:    pool,
+           MinVersion:   tls.VersionTLS12,
+           VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 				if len(verifiedChains) == 0 || len(verifiedChains[0]) == 0 {
 					return fmt.Errorf("no client certificate")
 				}

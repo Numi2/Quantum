@@ -10,6 +10,7 @@ import (
    "crypto/sha256"
    "crypto/tls"
    "crypto/x509"
+   "crypto/x509/pkix"
    "database/sql"
    "encoding/base64"
    "encoding/hex"
@@ -347,8 +348,15 @@ func main() {
            }
        }
    }
-   // start HTTPS server
-   server := &http.Server{Addr: addr, Handler: mux, TLSConfig: &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12}}
+   // start HTTPS server with timeouts
+   server := &http.Server{
+       Addr:         addr,
+       Handler:      mux,
+       ReadTimeout:  5 * time.Second,
+       WriteTimeout: 10 * time.Second,
+       IdleTimeout:  120 * time.Second,
+       TLSConfig:    &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12},
+   }
    go func() {
        log.Printf("Signing service listening on %s (HTTPS)", addr)
        if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
@@ -363,7 +371,7 @@ func main() {
    log.Println("shutting down...")
    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
    defer cancel()
-   if err := srv.Shutdown(ctx); err != nil {
+   if err := server.Shutdown(ctx); err != nil {
        log.Fatalf("shutdown error: %v", err)
    }
    log.Println("service stopped")

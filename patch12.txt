@@ -1,0 +1,26 @@
+acme-server/main.go:
+- Added imports for crypto/rsa (aliased as rsa), math/big, and errors to fix missing type support and ensure rsa is properly recognized.
+- Refactored HTTP handler registration to use http.NewServeMux (mux) and configured server with ReadTimeout (5s), WriteTimeout (10s), IdleTimeout (120s).
+- Updated CA service CSR HTTP POST to defer resp.Body.Close() immediately for all code paths.
+ca-service/main.go:
+- Corrected TLS certificate construction by using caCert.Raw and caKey instead of undefined certObj and tlsKey.
+- Enhanced HTTP server instantiation with timeouts: ReadTimeout (5s), WriteTimeout (10s), IdleTimeout (120s).
+cli/main.go:
+- Added error handling for JSON payload marshaling before sending request.
+- Replaced default http.Post with http.Client having a 10s timeout.
+- Imported "time" package to support client timeout configuration.
+device-service/main.go:
+- Introduced devicesMu (sync.Mutex) to guard the devices map against concurrent access.
+- Added defer r.Body.Close() to close request body in provisionHandler.
+- Replaced http.Post with http.Client (10s Timeout) for CA service calls.
+- Migrated to http.Server with ServeMux and timeouts (ReadTimeout:5s, WriteTimeout:10s, IdleTimeout:120s) instead of http.ListenAndServe.
+signing-service/main.go:
+- Added import "crypto/x509/pkix" to support PKIX subject when generating CSRs.
+- Enhanced server instantiation with ReadTimeout (5s), WriteTimeout (10s), IdleTimeout (120s).
+- Corrected graceful shutdown call from srv.Shutdown to server.Shutdown.
+transparency-log-service/main.go:
+- Added import "sync" and defined storageMu to protect append-only log writes.
+- Added defer r.Body.Close() to close request body in addChainHandler.
+- Wrapped log file writes in addChainHandler with storageMu.Lock()/Unlock().
+- Refactored metrics server to use http.Server with timeouts: ReadTimeout (5s), WriteTimeout (10s), IdleTimeout (120s).
+- Refactored main transparency log server to use http.Server with same timeouts instead of http.ListenAndServe.

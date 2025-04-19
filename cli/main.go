@@ -1,14 +1,15 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/json"
-	"flag"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
+   "bytes"
+   "crypto/sha256"
+   "encoding/json"
+   "flag"
+   "fmt"
+   "io"
+   "net/http"
+   "os"
+   "time"
 )
 
 func main() {
@@ -49,8 +50,13 @@ func main() {
 		}
 		payload["provenance"] = string(data)
 	}
-	reqBody, _ := json.Marshal(payload)
-	resp, err := http.Post(*server+"/v1/signatures", "application/json", bytes.NewReader(reqBody))
+   reqBody, err := json.Marshal(payload)
+   if err != nil {
+       fmt.Fprintf(os.Stderr, "failed to encode request payload: %v\n", err)
+       os.Exit(1)
+   }
+   client := &http.Client{Timeout: 10 * time.Second}
+   resp, err := client.Post(*server+"/v1/signatures", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "request failed: %v\n", err)
 		os.Exit(1)

@@ -1,32 +1,35 @@
 package main
 
 import (
-	"bytes"
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"database/sql"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
-	"fmt"
-	_ "github.com/lib/pq"
-	"io"
-	"log"
-	"net/http"
-	"os"
-	"strings"
-	"sync"
-	"time"
+   "bytes"
+   "crypto"
+   "crypto/ecdsa"
+   "crypto/elliptic"
+   "crypto/rand"
+   rsa "crypto/rsa"
+   "crypto/sha256"
+   "crypto/tls"
+   "crypto/x509"
+   "crypto/x509/pkix"
+   "database/sql"
+   "encoding/base64"
+   "encoding/json"
+   "encoding/pem"
+   "errors"
+   "fmt"
+   _ "github.com/lib/pq"
+   "io"
+   "log"
+   "math/big"
+   "net/http"
+   "os"
+   "strings"
+   "sync"
+   "time"
 
-	"golang.org/x/crypto/ocsp"
+   "golang.org/x/crypto/ocsp"
 
-	jose "gopkg.in/square/go-jose.v2"
+   jose "gopkg.in/square/go-jose.v2"
 )
 
 // getEnv returns environment variable or default
@@ -250,15 +253,15 @@ func main() {
 			log.Fatalf("failed to load CA root")
 		}
 		httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-		resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
-		if err != nil {
-			log.Fatalf("CSR sign request failed: %v", err)
-		}
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			log.Fatalf("read CA response: %v", err)
-		}
+       resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
+       if err != nil {
+           log.Fatalf("CSR sign request failed: %v", err)
+       }
+       defer resp.Body.Close()
+       body, err := io.ReadAll(resp.Body)
+       if err != nil {
+           log.Fatalf("read CA response: %v", err)
+       }
 		// parse leaf certificate
 		block, _ := pem.Decode(body)
 		if block == nil || block.Type != "CERTIFICATE" {
@@ -293,35 +296,37 @@ func main() {
 		log.Fatalf("failed to load CA root")
 	}
 	httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}}}}
-	// register handlers
-	// health & readiness probes
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		// readiness: ensure keystore and cert are initialized
-		if certObj == nil || ks == nil {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	http.HandleFunc("/directory", directoryHandler)
-	http.HandleFunc("/acme/new-nonce", newNonceHandler)
-	http.HandleFunc("/acme/new-account", newAccountHandler)
-	http.HandleFunc("/acme/new-order", newOrderHandler)
-	http.HandleFunc("/acme/challenge/", challengeHandler)
-	http.HandleFunc("/acme/finalize/", finalizeHandler)
-	http.HandleFunc("/acme/cert/", certHandler)
-	http.HandleFunc("/acme/revoke-cert", revokeCertHandler)
-	http.HandleFunc("/acme/key-change", stubHandler)
-	// start HTTPS server with OCSP stapling
-	server := &http.Server{
-		Addr:    addr,
-		Handler: nil,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-			MinVersion:   tls.VersionTLS12,
-		},
-	}
+   // register handlers with customizable timeouts
+   mux := http.NewServeMux()
+   mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+   mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+       if certObj == nil || ks == nil {
+           http.Error(w, "not ready", http.StatusServiceUnavailable)
+           return
+       }
+       w.WriteHeader(http.StatusOK)
+   })
+   mux.HandleFunc("/directory", directoryHandler)
+   mux.HandleFunc("/acme/new-nonce", newNonceHandler)
+   mux.HandleFunc("/acme/new-account", newAccountHandler)
+   mux.HandleFunc("/acme/new-order", newOrderHandler)
+   mux.HandleFunc("/acme/challenge/", challengeHandler)
+   mux.HandleFunc("/acme/finalize/", finalizeHandler)
+   mux.HandleFunc("/acme/cert/", certHandler)
+   mux.HandleFunc("/acme/revoke-cert", revokeCertHandler)
+   mux.HandleFunc("/acme/key-change", stubHandler)
+   // start HTTPS server with timeouts and OCSP stapling
+   server := &http.Server{
+       Addr:         addr,
+       Handler:      mux,
+       ReadTimeout:  5 * time.Second,
+       WriteTimeout: 10 * time.Second,
+       IdleTimeout:  120 * time.Second,
+       TLSConfig: &tls.Config{
+           Certificates: []tls.Certificate{tlsCert},
+           MinVersion:   tls.VersionTLS12,
+       },
+   }
 	// periodic OCSP staple refresh
 	go func() {
 		for {
