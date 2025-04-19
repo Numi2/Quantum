@@ -1,23 +1,39 @@
 package main
 
 import (
+   "bytes"
    "context"
+   "crypto"
    "crypto/ecdsa"
    "crypto/elliptic"
    "crypto/rand"
    "crypto/sha256"
+   "crypto/tls"
+   "crypto/x509"
    "database/sql"
    "encoding/base64"
    "encoding/hex"
    "encoding/json"
+   "encoding/pem"
    "fmt"
+   "io"
+   "io/ioutil"
    "log"
    "net/http"
    "os"
    "os/signal"
+   "path/filepath"
    "strings"
    "syscall"
    "time"
+   "math/big"
+
+   "github.com/ThalesIgnite/crypto11"
+   _ "github.com/mattn/go-sqlite3"
+   "github.com/cloudflare/circl/sign/dilithium2"
+   "github.com/prometheus/client_golang/prometheus/promhttp"
+   "golang.org/x/crypto/ocsp"
+)
    _ "github.com/mattn/go-sqlite3"
    "github.com/cloudflare/circl/sign/dilithium2"
    "github.com/prometheus/client_golang/prometheus/promhttp"
@@ -39,16 +55,44 @@ type Account struct {
    UsageReset time.Time
 }
 
+// sbomHandler returns the SBOM for a log entry
+func sbomHandler(w http.ResponseWriter, r *http.Request, id string) {
+   row := db.QueryRow(`SELECT sbom FROM log_entries WHERE id = ?`, id)
+   var sbom string
+   if err := row.Scan(&sbom); err != nil || sbom == "" {
+       http.Error(w, "SBOM not found", http.StatusNotFound)
+       return
+   }
+   w.Header().Set("Content-Type", "application/json")
+   w.Write([]byte(sbom))
+}
+
+// provenanceHandler returns the provenance for a log entry
+func provenanceHandler(w http.ResponseWriter, r *http.Request, id string) {
+   row := db.QueryRow(`SELECT provenance FROM log_entries WHERE id = ?`, id)
+   var prov string
+   if err := row.Scan(&prov); err != nil || prov == "" {
+       http.Error(w, "provenance not found", http.StatusNotFound)
+       return
+   }
+   w.Header().Set("Content-Type", "application/json")
+   w.Write([]byte(prov))
+}
+
 // SignRequest defines a code-signing request
 type SignRequest struct {
    ArtifactHash string `json:"artifactHash"`
    Algorithm    string `json:"algorithm"`
+   SBOM         string `json:"sbom,omitempty"`
+   Provenance   string `json:"provenance,omitempty"`
 }
 
 // SignResponse returns the hybrid signature and log URL
 type SignResponse struct {
-   Signature   string `json:"signature"`
-   LogEntryURL string `json:"logEntryURL"`
+   Signature      string `json:"signature"`
+   LogEntryURL    string `json:"logEntryURL"`
+   SBOMURL        string `json:"sbomURL,omitempty"`
+   ProvenanceURL  string `json:"provenanceURL,omitempty"`
 }
 
 // LogEntry is a transparency log record
@@ -63,8 +107,14 @@ type LogEntry struct {
 
 // Configuration and global variables
 var (
-   addr       = getEnv("SIGNING_ADDR", ":7000")
-   dbDSN      = getEnv("DB_DSN", "signing.db")
+   // service configuration
+   addr        = getEnv("SIGNING_ADDR", ":7000")
+   dbDSN       = getEnv("DB_DSN", "signing.db")
+   keyDir      = getEnv("KEY_DIR", "keys")
+   tlsCertFile = getEnv("TLS_CERT_FILE", "signing-service-cert.pem")
+   tlsKeyFile  = getEnv("TLS_KEY_FILE", "signing-service-key.pem")
+
+   // global state
    db         *sql.DB
    privateKey *ecdsa.PrivateKey
    pqPub      dilithium2.PublicKey
@@ -103,6 +153,8 @@ func main() {
   artifact_hash TEXT NOT NULL,
   algorithm TEXT NOT NULL,
   signature TEXT NOT NULL,
+  sbom TEXT,
+  provenance TEXT,
   timestamp DATETIME NOT NULL,
   FOREIGN KEY(account_id) REFERENCES accounts(id)
 );`,
@@ -113,32 +165,197 @@ func main() {
        }
    }
 
-   // generate signing keys
-   privateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-   if err != nil {
-       log.Fatalf("failed to generate ECDSA key: %v", err)
+   // initialize key store (FS or PKCS#11)
+   storeType := getEnv("KEYSTORE_TYPE", "fs")
+   var ks KeyStore
+   switch storeType {
+   case "fs":
+       ks, err = NewFSKeyStore(keyDir)
+   case "pkcs11":
+       ks, err = NewPKCS11KeyStore(keyDir)
+   default:
+       log.Fatalf("unknown KEYSTORE_TYPE '%s', must be 'fs' or 'pkcs11'", storeType)
    }
-   _, pqPrivLocal, err := dilithium2.GenerateKey(rand.Reader)
    if err != nil {
-       log.Fatalf("failed to generate PQC key: %v", err)
+       log.Fatalf("failed to initialize keystore: %v", err)
    }
-   pqPriv = pqPrivLocal
+   // load or generate ECDSA key
+   rawKey, err := ks.GetPrivateKey("ecdsa")
+   if err == ErrKeyNotFound {
+       priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+       if err != nil {
+           log.Fatalf("failed to generate ECDSA key: %v", err)
+       }
+       if err := ks.ImportPrivateKey("ecdsa", priv); err != nil {
+           log.Fatalf("failed to store ECDSA key: %v", err)
+       }
+       privateKey = priv
+   } else if err != nil {
+       log.Fatalf("error loading ECDSA key: %v", err)
+   } else {
+       priv, ok := rawKey.(*ecdsa.PrivateKey)
+       if !ok {
+           log.Fatalf("invalid ECDSA key type")
+       }
+       privateKey = priv
+   }
+   // load or generate PQC Dilithium2 key
+   pqcPath := filepath.Join(keyDir, "pqc-key.bin")
+   if data, err := ioutil.ReadFile(pqcPath); err == nil {
+       var priv dilithium2.PrivateKey
+       if err := priv.UnmarshalBinary(data); err != nil {
+           log.Fatalf("failed to parse PQC key: %v", err)
+       }
+       pqPriv = priv
+       pqPub = priv.Public().(dilithium2.PublicKey)
+   } else {
+       pub, priv, err := dilithium2.GenerateKey(rand.Reader)
+       if err != nil {
+           log.Fatalf("failed to generate PQC key: %v", err)
+       }
+       data, err := priv.MarshalBinary()
+       if err != nil {
+           log.Fatalf("failed to marshal PQC key: %v", err)
+       }
+       if err := ioutil.WriteFile(pqcPath+".tmp", data, 0600); err != nil {
+           log.Fatalf("failed to write PQC key: %v", err)
+       }
+       if err := os.Rename(pqcPath+".tmp", pqcPath); err != nil {
+           log.Fatalf("failed to store PQC key: %v", err)
+       }
+       pqPriv = priv
+       pqPub = pub
+   }
 
-   // HTTP server setup
+   // HTTP and TLS server setup
+   // HTTP and TLS server setup
    mux := http.NewServeMux()
+   // health & readiness probes
+   mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+   mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+       // readiness: ensure DB is open and keys loaded
+       if db == nil {
+           http.Error(w, "db not ready", http.StatusServiceUnavailable)
+           return
+       }
+       // optional: ping DB
+       if err := db.Ping(); err != nil {
+           http.Error(w, "db ping failed", http.StatusServiceUnavailable)
+           return
+       }
+       w.WriteHeader(http.StatusOK)
+   })
    // public endpoints
    mux.HandleFunc("/v1/accounts", accountsHandler)
-   mux.HandleFunc("/v1/log/", logHandler)
+   mux.HandleFunc("/v1/log/", logRouter)
    mux.HandleFunc("/v1/log", listHandler)
    mux.Handle("/metrics", promhttp.Handler())
    // protected endpoints
    mux.Handle("/v1/accounts/", clientAuth(http.HandlerFunc(accountInfoHandler)))
    mux.Handle("/v1/signatures", clientAuth(http.HandlerFunc(signHandler)))
 
-   srv := &http.Server{Addr: addr, Handler: mux}
+   // initialize keystore for TLS identity
+   tlsKeyDir := getEnv("KEY_DIR", "keys")
+   ks, err := NewFSKeyStore(tlsKeyDir)
+   if err != nil {
+       log.Fatalf("failed to init keystore: %v", err)
+   }
+   // load or generate TLS private key
+   rawTlsKey, err := ks.GetPrivateKey("tls")
+   var tlsPriv *ecdsa.PrivateKey
+   if err == ErrKeyNotFound {
+       p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+       if err != nil {
+           log.Fatalf("generate TLS key: %v", err)
+       }
+       if err := ks.ImportPrivateKey("tls", p); err != nil {
+           log.Fatalf("store TLS key: %v", err)
+       }
+       tlsPriv = p
+   } else if err != nil {
+       log.Fatalf("load TLS key: %v", err)
+   } else {
+       var ok bool
+       tlsPriv, ok = rawTlsKey.(*ecdsa.PrivateKey)
+       if !ok {
+           log.Fatalf("invalid TLS key type")
+       }
+   }
+   // load or request TLS certificate from CA
+   certObj, err := ks.GetCertificate("tls")
+   if err == ErrKeyNotFound {
+       csrTmpl := x509.CertificateRequest{Subject: pkix.Name{CommonName: "signing-service"}}
+       csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, tlsPriv)
+       if err != nil {
+           log.Fatalf("create CSR: %v", err)
+       }
+       buf := &bytes.Buffer{}
+       pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+       // request from CA
+       caCertPEM, err := ioutil.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
+       if err != nil {
+           log.Fatalf("read CA cert: %v", err)
+       }
+       pool := x509.NewCertPool()
+       if !pool.AppendCertsFromPEM(caCertPEM) {
+           log.Fatalf("failed to load CA root")
+       }
+       client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+       resp, err := client.Post(getEnv("CA_SIGN_URL", "https://localhost:5000/sign"), "application/x-pem-file", buf)
+       if err != nil {
+           log.Fatalf("CSR sign request failed: %v", err)
+       }
+       body, err := ioutil.ReadAll(resp.Body)
+       resp.Body.Close()
+       if err != nil {
+           log.Fatalf("read CA response: %v", err)
+       }
+       block, _ := pem.Decode(body)
+       if block == nil || block.Type != "CERTIFICATE" {
+           log.Fatalf("invalid certificate PEM from CA")
+       }
+       cert, err := x509.ParseCertificate(block.Bytes)
+       if err != nil {
+           log.Fatalf("parse certificate: %v", err)
+       }
+       if err := ks.ImportCertificate("tls", cert); err != nil {
+           log.Fatalf("store TLS cert: %v", err)
+       }
+       certObj = cert
+   } else if err != nil {
+       log.Fatalf("load TLS cert: %v", err)
+   }
+   // prepare TLS certificate
+   tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: tlsPriv}
+   // initial OCSP staple
+   if reqBytes, err := ocsp.CreateRequest(certObj, caCert, &ocsp.RequestOptions{Hash: crypto.SHA1}); err == nil {
+       // fetch OCSP response
+       caCertPEM, err := ioutil.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
+       if err != nil {
+           log.Printf("warning: cannot read CA cert for OCSP: %v", err)
+       } else {
+           poolOCSP := x509.NewCertPool()
+           if !poolOCSP.AppendCertsFromPEM(caCertPEM) {
+               log.Printf("warning: failed to append CA cert for OCSP")
+           } else {
+               client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: poolOCSP}}}
+               resp, err := client.Post(getEnv("CA_OCSP_URL", "https://localhost:5000/ocsp"), "application/ocsp-request", bytes.NewReader(reqBytes))
+               if err != nil {
+                   log.Printf("warning: OCSP request failed: %v", err)
+               } else {
+                   if respBytes, err := ioutil.ReadAll(resp.Body); err == nil {
+                       tlsCert.OCSPStaple = respBytes
+                   }
+                   resp.Body.Close()
+               }
+           }
+       }
+   }
+   // start HTTPS server
+   server := &http.Server{Addr: addr, Handler: mux, TLSConfig: &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12}}
    go func() {
-       log.Printf("Service listening on %s", addr)
-       if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+       log.Printf("Signing service listening on %s (HTTPS)", addr)
+       if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
            log.Fatalf("server error: %v", err)
        }
    }()
@@ -282,8 +499,8 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
    accountID := r.Context().Value(ctxKeyAccountID).(string)
    ts := time.Now().UTC()
    _, err = db.Exec(
-       `INSERT INTO log_entries(id,account_id,artifact_hash,algorithm,signature,timestamp) VALUES(?,?,?,?,?,?);`,
-       entryID, accountID, req.ArtifactHash, req.Algorithm, hybridSig, ts,
+       `INSERT INTO log_entries(id,account_id,artifact_hash,algorithm,signature,sbom,provenance,timestamp) VALUES(?,?,?,?,?,?,?,?);`,
+       entryID, accountID, req.ArtifactHash, req.Algorithm, hybridSig, req.SBOM, req.Provenance, ts,
    )
    if err != nil {
        http.Error(w, "failed to record log entry", http.StatusInternalServerError)
@@ -292,6 +509,22 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
    resp := SignResponse{Signature: hybridSig, LogEntryURL: fmt.Sprintf("http://%s/v1/log/%s", r.Host, entryID)}
    w.Header().Set("Content-Type", "application/json")
    json.NewEncoder(w).Encode(resp)
+}
+
+// logRouter routes log entry, sbom, and provenance requests
+func logRouter(w http.ResponseWriter, r *http.Request) {
+   path := strings.TrimPrefix(r.URL.Path, "/v1/log/")
+   if strings.HasSuffix(path, "/sbom") {
+       id := strings.TrimSuffix(path, "/sbom")
+       sbomHandler(w, r, id)
+       return
+   }
+   if strings.HasSuffix(path, "/provenance") {
+       id := strings.TrimSuffix(path, "/provenance")
+       provenanceHandler(w, r, id)
+       return
+   }
+   logHandler(w, r)
 }
 
 // logHandler retrieves a log entry by ID

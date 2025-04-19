@@ -13,6 +13,8 @@ import (
 
 func main() {
    artifact := flag.String("artifact", "", "Path to artifact to sign")
+   sbomPath := flag.String("sbom", "", "Path to SBOM JSON file to include")
+   provPath := flag.String("provenance", "", "Path to SLSA provenance JSON file to include")
    server := flag.String("server", "http://localhost:7000", "Signing service URL")
    algorithm := flag.String("algorithm", "ECDSA+Dilithium", "Signing algorithm")
    flag.Parse()
@@ -27,10 +29,27 @@ func main() {
    }
    hash := sha256.Sum256(data)
    hashStr := fmt.Sprintf("sha256:%x", hash[:])
-   reqBody, _ := json.Marshal(map[string]string{
+   payload := map[string]string{
        "artifactHash": hashStr,
        "algorithm":    *algorithm,
-   })
+   }
+   if *sbomPath != "" {
+       data, err := os.ReadFile(*sbomPath)
+       if err != nil {
+           fmt.Fprintf(os.Stderr, "failed to read SBOM: %v\n", err)
+           os.Exit(1)
+       }
+       payload["sbom"] = string(data)
+   }
+   if *provPath != "" {
+       data, err := os.ReadFile(*provPath)
+       if err != nil {
+           fmt.Fprintf(os.Stderr, "failed to read provenance: %v\n", err)
+           os.Exit(1)
+       }
+       payload["provenance"] = string(data)
+   }
+   reqBody, _ := json.Marshal(payload)
    resp, err := http.Post(*server+"/v1/signatures", "application/json", bytes.NewReader(reqBody))
    if err != nil {
        fmt.Fprintf(os.Stderr, "request failed: %v\n", err)
@@ -43,12 +62,20 @@ func main() {
        os.Exit(1)
    }
    var out struct {
-       Signature   string `json:"signature"`
-       LogEntryURL string `json:"logEntryURL"`
+       Signature      string `json:"signature"`
+       LogEntryURL    string `json:"logEntryURL"`
+       SBOMURL        string `json:"sbomURL"`
+       ProvenanceURL  string `json:"provenanceURL"`
    }
    if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
        fmt.Fprintf(os.Stderr, "invalid response: %v\n", err)
        os.Exit(1)
    }
    fmt.Printf("Signature: %s\nLogEntryURL: %s\n", out.Signature, out.LogEntryURL)
+   if out.SBOMURL != "" {
+       fmt.Printf("SBOMURL: %s\n", out.SBOMURL)
+   }
+   if out.ProvenanceURL != "" {
+       fmt.Printf("ProvenanceURL: %s\n", out.ProvenanceURL)
+   }
 }

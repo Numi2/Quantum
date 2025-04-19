@@ -2,15 +2,208 @@ package main
 
 import (
    "bytes"
+   "crypto"
+   "crypto/ecdsa"
+   "crypto/elliptic"
    "crypto/rand"
+   "crypto/sha256"
+   "crypto/tls"
+   "crypto/x509"
+   "crypto/x509/pkix"
    "encoding/base64"
    "encoding/json"
    "encoding/pem"
+   "fmt"
    "io"
    "log"
    "net/http"
+   "os"
    "strings"
+   "sync"
+   "time"
+
+   "golang.org/x/crypto/ocsp"
+
+   jose "gopkg.in/square/go-jose.v2"
 )
+
+// getEnv returns environment variable or default
+func getEnv(key, def string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return def
+}
+
+// CA certificate file used to verify CA service
+var (
+    caCertFile = getEnv("CA_CERT_FILE", "ca-cert.pem")
+    httpClient *http.Client
+)
+
+// Storage and nonce management
+var (
+    validNonces = make(map[string]bool)
+    noncesMutex sync.Mutex
+
+    storeMutex sync.Mutex
+)
+
+// Persistent store structure
+type acmeStore struct {
+    Accounts    map[string]Account   `json:"accounts"`
+    Orders      map[string]Order     `json:"orders"`
+    Challenges  map[string]Challenge `json:"challenges"`
+    OrderTokens map[string]string    `json:"orderTokens"`
+}
+
+// loadStore initializes in-memory stores from disk
+func loadStore() {
+    f, err := os.Open("acme-store.json")
+    if err != nil {
+        if !os.IsNotExist(err) {
+            log.Printf("failed to open store file: %v", err)
+        }
+        return
+    }
+    defer f.Close()
+    var s acmeStore
+    if err := json.NewDecoder(f).Decode(&s); err != nil {
+        log.Printf("failed to decode store: %v", err)
+        return
+    }
+    accounts = s.Accounts
+    orders = s.Orders
+    challenges = s.Challenges
+    orderTokens = s.OrderTokens
+}
+
+// saveStore writes in-memory stores to disk
+func saveStore() {
+    storeMutex.Lock()
+    defer storeMutex.Unlock()
+    tmpFile := "acme-store.json.tmp"
+    f, err := os.Create(tmpFile)
+    if err != nil {
+        log.Printf("failed to create store file: %v", err)
+        return
+    }
+    if err := json.NewEncoder(f).Encode(acmeStore{
+        Accounts:    accounts,
+        Orders:      orders,
+        Challenges:  challenges,
+        OrderTokens: orderTokens,
+    }); err != nil {
+        log.Printf("failed to encode store: %v", err)
+    }
+    f.Close()
+    os.Rename(tmpFile, "acme-store.json")
+}
+
+// verifyJWS verifies the JWS-signed ACME request
+func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountURL string, jwk *jose.JSONWebKey, err error) {
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, "unable to read request", http.StatusBadRequest)
+        return
+    }
+    defer r.Body.Close()
+    var req struct {
+        Protected string `json:"protected"`
+        Payload   string `json:"payload"`
+        Signature string `json:"signature"`
+    }
+    if err := json.Unmarshal(body, &req); err != nil {
+        http.Error(w, "invalid JWS request", http.StatusBadRequest)
+        return nil, "", nil, err
+    }
+    phBytes, err := base64.RawURLEncoding.DecodeString(req.Protected)
+    if err != nil {
+        http.Error(w, "invalid protected header encoding", http.StatusBadRequest)
+        return
+    }
+    var ph struct {
+        Alg   string                 `json:"alg"`
+        Nonce string                 `json:"nonce"`
+        URL   string                 `json:"url"`
+        Jwk   map[string]interface{} `json:"jwk,omitempty"`
+        Kid   string                 `json:"kid,omitempty"`
+    }
+    if err := json.Unmarshal(phBytes, &ph); err != nil {
+        http.Error(w, "invalid protected header", http.StatusBadRequest)
+        return
+    }
+    // Validate nonce
+    noncesMutex.Lock()
+    if !validNonces[ph.Nonce] {
+        noncesMutex.Unlock()
+        http.Error(w, "invalid nonce", http.StatusBadRequest)
+        return
+    }
+    delete(validNonces, ph.Nonce)
+    noncesMutex.Unlock()
+    // Validate URL
+    expectedURL := fmt.Sprintf("https://%s%s", r.Host, r.URL.Path)
+    if ph.URL != expectedURL {
+        http.Error(w, "invalid url in protected header", http.StatusBadRequest)
+        return
+    }
+    // Decode payload
+    payload, err = base64.RawURLEncoding.DecodeString(req.Payload)
+    if err != nil {
+        http.Error(w, "invalid payload encoding", http.StatusBadRequest)
+        return
+    }
+    signingInput := []byte(req.Protected + "." + req.Payload)
+    sigBytes, err := base64.RawURLEncoding.DecodeString(req.Signature)
+    if err != nil {
+        http.Error(w, "invalid signature encoding", http.StatusBadRequest)
+        return
+    }
+    // Determine public key
+    var pubKey interface{}
+    if ph.Jwk != nil {
+        jwkJSON, _ := json.Marshal(ph.Jwk)
+        var parsed jose.JSONWebKey
+        if err := parsed.UnmarshalJSON(jwkJSON); err != nil {
+            http.Error(w, "invalid jwk", http.StatusBadRequest)
+            return nil, "", nil, err
+        }
+        pubKey = parsed.Key
+        jwk = &parsed
+    } else {
+        accountURL = ph.Kid
+        acct, ok := accounts[accountURL]
+        if !ok {
+            http.Error(w, "account not found", http.StatusUnauthorized)
+            return
+        }
+        pubKey = acct.Key.Key
+        jwk = &acct.Key
+    }
+    hash := sha256.Sum256(signingInput)
+    // Verify signature
+    switch key := pubKey.(type) {
+    case *rsa.PublicKey:
+        if err = rsa.VerifyPKCS1v15(key, crypto.SHA256, hash[:], sigBytes); err != nil {
+            http.Error(w, "invalid signature", http.StatusUnauthorized)
+            return payload, accountURL, jwk, err
+        }
+    case *ecdsa.PublicKey:
+        half := len(sigBytes) / 2
+        rInt := new(big.Int).SetBytes(sigBytes[:half])
+        sInt := new(big.Int).SetBytes(sigBytes[half:])
+        if !ecdsa.Verify(key, hash[:], rInt, sInt) {
+            http.Error(w, "invalid signature", http.StatusUnauthorized)
+            return payload, accountURL, jwk, errors.New("ecdsa verification failed")
+        }
+    default:
+        http.Error(w, "unsupported key type", http.StatusBadRequest)
+        return
+    }
+    return payload, accountURL, jwk, nil
+}
+
 
 const addr = ":4000"
 
@@ -24,14 +217,119 @@ type Directory struct {
 }
 
 var dir = Directory{
-   NewNonce:   "http://localhost" + addr + "/acme/new-nonce",
-   NewAccount: "http://localhost" + addr + "/acme/new-account",
-   NewOrder:   "http://localhost" + addr + "/acme/new-order",
-   RevokeCert: "http://localhost" + addr + "/acme/revoke-cert",
-   KeyChange:  "http://localhost" + addr + "/acme/key-change",
+   NewNonce:   "https://localhost" + addr + "/acme/new-nonce",
+   NewAccount: "https://localhost" + addr + "/acme/new-account",
+   NewOrder:   "https://localhost" + addr + "/acme/new-order",
+   RevokeCert: "https://localhost" + addr + "/acme/revoke-cert",
+   KeyChange:  "https://localhost" + addr + "/acme/key-change",
 }
 
 func main() {
+   // load ACME state
+   loadStore()
+
+   // initialize keystore for TLS identity
+   keyDir := getEnv("KEY_DIR", "keys")
+   ks, err := NewFSKeyStore(keyDir)
+   if err != nil {
+       log.Fatalf("failed to init keystore: %v", err)
+   }
+   // load or generate ACME server private key
+   rawKey, err := ks.GetPrivateKey("acme-tls")
+   var privKey *ecdsa.PrivateKey
+   if err == ErrKeyNotFound {
+       p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+       if err != nil {
+           log.Fatalf("generate ACME TLS key: %v", err)
+       }
+       if err := ks.ImportPrivateKey("acme-tls", p); err != nil {
+           log.Fatalf("store ACME TLS key: %v", err)
+       }
+       privKey = p
+   } else if err != nil {
+       log.Fatalf("load ACME TLS key: %v", err)
+   } else {
+       var ok bool
+       privKey, ok = rawKey.(*ecdsa.PrivateKey)
+       if !ok {
+           log.Fatalf("ACME key is not ECDSA")
+       }
+   }
+   // load or request ACME server certificate from CA
+   certObj, err := ks.GetCertificate("acme-tls")
+   if err == ErrKeyNotFound {
+       // create CSR
+       csrTmpl := x509.CertificateRequest{Subject: pkix.Name{CommonName: "acme-server"}}
+       csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, privKey)
+       if err != nil {
+           log.Fatalf("create CSR: %v", err)
+       }
+       buf := &bytes.Buffer{}
+       pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+       // request from CA service
+       caCertPEM, err := os.ReadFile(caCertFile)
+       if err != nil {
+           log.Fatalf("read CA cert: %v", err)
+       }
+       pool := x509.NewCertPool()
+       if !pool.AppendCertsFromPEM(caCertPEM) {
+           log.Fatalf("failed to load CA root")
+       }
+       httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+       resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
+       if err != nil {
+           log.Fatalf("CSR sign request failed: %v", err)
+       }
+       body, err := io.ReadAll(resp.Body)
+       resp.Body.Close()
+       if err != nil {
+           log.Fatalf("read CA response: %v", err)
+       }
+       // parse leaf certificate
+       block, _ := pem.Decode(body)
+       if block == nil || block.Type != "CERTIFICATE" {
+           log.Fatalf("invalid certificate PEM")
+       }
+       cert, err := x509.ParseCertificate(block.Bytes)
+       if err != nil {
+           log.Fatalf("parse certificate: %v", err)
+       }
+       if err := ks.ImportCertificate("acme-tls", cert); err != nil {
+           log.Fatalf("store ACME cert: %v", err)
+       }
+       certObj = cert
+   } else if err != nil {
+       log.Fatalf("load ACME cert: %v", err)
+   }
+   // build TLS key pair for server and client
+   tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: privKey}
+   // initial OCSP stapling for server certificate
+   if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
+       log.Printf("warning: failed to fetch initial OCSP staple: %v", err)
+   } else {
+       tlsCert.OCSPStaple = staple
+   }
+   // setup HTTPS client to talk to CA service with mTLS
+   caCertPEM, err := os.ReadFile(caCertFile)
+   if err != nil {
+       log.Fatalf("read CA cert: %v", err)
+   }
+   pool := x509.NewCertPool()
+   if !pool.AppendCertsFromPEM(caCertPEM) {
+       log.Fatalf("failed to load CA root")
+   }
+   httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}}}}
+   // register handlers
+   // health & readiness probes
+   http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+   http.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+       // readiness: ensure keystore and cert are initialized
+       if certObj == nil || ks == nil {
+           http.Error(w, "not ready", http.StatusServiceUnavailable)
+           return
+       }
+       w.WriteHeader(http.StatusOK)
+   })
    http.HandleFunc("/directory", directoryHandler)
    http.HandleFunc("/acme/new-nonce", newNonceHandler)
    http.HandleFunc("/acme/new-account", newAccountHandler)
@@ -39,11 +337,30 @@ func main() {
    http.HandleFunc("/acme/challenge/", challengeHandler)
    http.HandleFunc("/acme/finalize/", finalizeHandler)
    http.HandleFunc("/acme/cert/", certHandler)
-   http.HandleFunc("/acme/revoke-cert", stubHandler)
+   http.HandleFunc("/acme/revoke-cert", revokeCertHandler)
    http.HandleFunc("/acme/key-change", stubHandler)
-
-   log.Printf("ACME server starting on %s", addr)
-   log.Fatal(http.ListenAndServe(addr, nil))
+   // start HTTPS server with OCSP stapling
+   server := &http.Server{
+       Addr:    addr,
+       Handler: nil,
+       TLSConfig: &tls.Config{
+           Certificates: []tls.Certificate{tlsCert},
+           MinVersion:   tls.VersionTLS12,
+       },
+   }
+   // periodic OCSP staple refresh
+   go func() {
+       for {
+           time.Sleep(12 * time.Hour)
+           if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
+               log.Printf("OCSP staple refresh failed: %v", err)
+           } else {
+               server.TLSConfig.Certificates[0].OCSPStaple = staple
+           }
+       }
+   }()
+   log.Printf("ACME server starting on https%s", addr)
+   log.Fatal(server.ListenAndServeTLS("", ""))
 }
 
 // directoryHandler returns the ACME directory
@@ -61,6 +378,9 @@ func newNonceHandler(w http.ResponseWriter, r *http.Request) {
        http.Error(w, "unable to generate nonce", http.StatusInternalServerError)
        return
    }
+   noncesMutex.Lock()
+   validNonces[nonce] = true
+   noncesMutex.Unlock()
    w.Header().Set("Replay-Nonce", nonce)
    w.WriteHeader(http.StatusOK)
 }
@@ -68,6 +388,42 @@ func newNonceHandler(w http.ResponseWriter, r *http.Request) {
 // stubHandler is a placeholder for unimplemented ACME endpoints
 func stubHandler(w http.ResponseWriter, r *http.Request) {
    http.Error(w, "not implemented", http.StatusNotImplemented)
+}
+// revokeCertHandler handles ACME certificate revocation (JWS+CSR parsing)
+func revokeCertHandler(w http.ResponseWriter, r *http.Request) {
+   // expect POST with JWS payload containing certificate DER (base64)
+   if r.Method != http.MethodPost {
+       http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+       return
+   }
+   payload, _, _, err := verifyJWS(w, r)
+   if err != nil {
+       return
+   }
+   var req struct { Certificate string `json:"certificate"` }
+   if err := json.Unmarshal(payload, &req); err != nil {
+       http.Error(w, "invalid request payload", http.StatusBadRequest)
+       return
+   }
+   certDER, err := base64.RawURLEncoding.DecodeString(req.Certificate)
+   if err != nil {
+       http.Error(w, "invalid certificate encoding", http.StatusBadRequest)
+       return
+   }
+   cert, err := x509.ParseCertificate(certDER)
+   if err != nil {
+       http.Error(w, "failed to parse certificate", http.StatusBadRequest)
+       return
+   }
+   serial := cert.SerialNumber.Text(16)
+   // send revoke request to CA service
+   body, _ := json.Marshal(map[string]string{"serial": serial})
+   resp, err := httpClient.Post(getEnv("CA_REVOKE_URL", "https://localhost:5000/revoke-cert"), "application/json", bytes.NewReader(body))
+   if err != nil || resp.StatusCode != http.StatusOK {
+       http.Error(w, "failed to revoke certificate", http.StatusInternalServerError)
+       return
+   }
+   w.WriteHeader(http.StatusOK)
 }
 
 // generateNonce creates a URL-safe base64-encoded random string
@@ -90,7 +446,8 @@ var (
 
 // Account represents a registered ACME account
 type Account struct {
-   Status string `json:"status"`
+   Status string          `json:"status"`
+   Key    jose.JSONWebKey `json:"key"`
 }
 
 // Order tracks ACME order state and certificate chain
@@ -122,9 +479,10 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
        http.Error(w, "unable to generate account ID", http.StatusInternalServerError)
        return
    }
-   accountURL := fmt.Sprintf("http://%s/acme/acct/%s", r.Host, id)
+   accountURL := fmt.Sprintf("https://%s/acme/acct/%s", r.Host, id)
    // store account
    accounts[accountURL] = Account{Status: "valid", Key: *jwk}
+   saveStore()
    w.Header().Set("Location", accountURL)
    w.WriteHeader(http.StatusCreated)
    json.NewEncoder(w).Encode(map[string]string{"status": "valid"})
@@ -159,10 +517,11 @@ func newOrderHandler(w http.ResponseWriter, r *http.Request) {
    orders[orderID] = Order{Status: "pending"}
    challenges[token] = Challenge{Token: token, KeyAuthorization: token, Status: "pending"}
    orderTokens[orderID] = token
+   saveStore()
    // build response URLs
-   orderURL := fmt.Sprintf("http://%s/acme/order/%s", r.Host, orderID)
-   chalURL := fmt.Sprintf("http://%s/acme/challenge/%s", r.Host, token)
-   finURL := fmt.Sprintf("http://%s/acme/finalize/%s", r.Host, orderID)
+   orderURL := fmt.Sprintf("https://%s/acme/order/%s", r.Host, orderID)
+   chalURL := fmt.Sprintf("https://%s/acme/challenge/%s", r.Host, token)
+   finURL := fmt.Sprintf("https://%s/acme/finalize/%s", r.Host, orderID)
    w.Header().Set("Location", orderURL)
    w.WriteHeader(http.StatusCreated)
    resp := map[string]interface{}{
@@ -191,6 +550,7 @@ func challengeHandler(w http.ResponseWriter, r *http.Request) {
        }
        ch.Status = "valid"
        challenges[token] = ch
+       saveStore()
        json.NewEncoder(w).Encode(map[string]string{"status": "valid", "token": token})
    default:
        http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -232,7 +592,8 @@ func finalizeHandler(w http.ResponseWriter, r *http.Request) {
    }
    var pemBuf bytes.Buffer
    pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-   resp, err := http.Post("http://localhost:5000/sign", "application/x-pem-file", &pemBuf)
+   // call CA service over HTTPS
+   resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", &pemBuf)
    if err != nil {
        http.Error(w, "failed to sign CSR", http.StatusInternalServerError)
        return
@@ -245,8 +606,9 @@ func finalizeHandler(w http.ResponseWriter, r *http.Request) {
    }
    order.CertChain = certChain
    order.Status = "valid"
-   order.CertURL = "http://localhost" + addr + "/acme/cert/" + orderID
+   order.CertURL = fmt.Sprintf("https://%s/acme/cert/%s", r.Host, orderID)
    orders[orderID] = order
+   saveStore()
    json.NewEncoder(w).Encode(map[string]string{"status": "valid", "certificate": order.CertURL})
 }
 
