@@ -90,4 +90,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: provenance
-          path: slsa-provenance.json
+          path: attestations/*.intoto.jsonl
