@@ -1,37 +1,35 @@
 package main
 
 import (
-   "crypto/ecdsa"
-   "crypto/elliptic"
-   "crypto/rand"
-   "crypto/tls"
-   "crypto/x509"
-   "crypto/x509/pkix"
-   "encoding/json"
-   "encoding/pem"
-   "fmt"
-   "github.com/prometheus/client_golang/prometheus"
-   "github.com/prometheus/client_golang/prometheus/promauto"
-   "github.com/prometheus/client_golang/prometheus/promhttp"
-   "go.uber.org/zap"
-   "golang.org/x/crypto/ocsp"
-  "io"
-  "io/ioutil"
-   "log"
-   "math/big"
-   "net/http"
-   "os"
-   "os/signal"
-   "path/filepath"
-   "sync"
-   "syscall"
-   "time"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"math/big"
+	"net/http"
+	"os"
+
+	"go.uber.org/zap"
+	"golang.org/x/crypto/ocsp"
+
+	"path/filepath"
+	"sync"
+
+	"time"
 )
 
 const (
-   addr = ":5000"
-   // maxBodyBytes limits the size of request bodies to prevent DoS
-   maxBodyBytes = 1 << 20 // 1MB
+	addr = ":5000"
+	// maxBodyBytes limits the size of request bodies to prevent DoS
+	maxBodyBytes = 1 << 20 // 1MB
 )
 
 var (
@@ -47,38 +45,39 @@ var (
 
 // revocationsFile is the persistent store for revoked certs
 // keyDir and revocationsFile are initialized in main
- var (
-   keyDir         string
-   revocationsFile string
-   serviceHost    string
-   // sugar is the global SugaredLogger
-   sugar          *zap.SugaredLogger
- )
+var (
+	keyDir          string
+	revocationsFile string
+	serviceHost     string
+	// sugar is the global SugaredLogger
+	sugar *zap.SugaredLogger
+)
+
 // getEnv returns the value of the environment variable named by key or defaultVal if not set or empty.
 func getEnv(key, defaultVal string) string {
-   if value, exists := os.LookupEnv(key); exists && value != "" {
-       return value
-   }
-   return defaultVal
+	if value, exists := os.LookupEnv(key); exists && value != "" {
+		return value
+	}
+	return defaultVal
 }
 
 func main() {
-   // initialize structured logger
-   logger, err := zap.NewProduction()
-   if err != nil {
-       log.Fatalf("failed to initialize logger: %v", err)
-   }
-   defer logger.Sync()
-   sugar = logger.Sugar()
-   // determine key directory, revocations file, and public host
-   keyDir = getEnv("KEY_DIR", "keys")
-   serviceHost = getEnv("SERVICE_HOST", "")
-   revocationsFile = filepath.Join(keyDir, "revocations.json")
+	// initialize structured logger
+	logger, err := zap.NewProduction()
+	if err != nil {
+		log.Fatalf("failed to initialize logger: %v", err)
+	}
+	defer logger.Sync()
+	sugar = logger.Sugar()
+	// determine key directory, revocations file, and public host
+	keyDir = getEnv("KEY_DIR", "keys")
+	serviceHost = getEnv("SERVICE_HOST", "")
+	revocationsFile = filepath.Join(keyDir, "revocations.json")
 
-   // ensure key directory exists
-   if err := os.MkdirAll(keyDir, 0755); err != nil {
-       sugar.Fatalf("failed to create key directory %s: %v", keyDir, err)
-   }
+	// ensure key directory exists
+	if err := os.MkdirAll(keyDir, 0755); err != nil {
+		sugar.Fatalf("failed to create key directory %s: %v", keyDir, err)
+	}
 	storeType := getEnv("KEYSTORE_TYPE", "fs")
 	var ks KeyStore
 	switch storeType {
@@ -173,20 +172,20 @@ func main() {
 	// start HTTPS server with mTLS support
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
-   // build TLS certificate for server using CA cert and key
-   tlsCert := tls.Certificate{Certificate: [][]byte{caCert.Raw}, PrivateKey: caKey}
-   server := &http.Server{
-       Addr:         addr,
-       Handler:      mux,
-       ReadTimeout:  5 * time.Second,
-       WriteTimeout: 10 * time.Second,
-       IdleTimeout:  120 * time.Second,
-       TLSConfig: &tls.Config{
-           Certificates: []tls.Certificate{tlsCert},
-           ClientAuth:   tls.RequireAndVerifyClientCert,
-           ClientCAs:    pool,
-           MinVersion:   tls.VersionTLS12,
-           VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	// build TLS certificate for server using CA cert and key
+	tlsCert := tls.Certificate{Certificate: [][]byte{caCert.Raw}, PrivateKey: caKey}
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    pool,
+			MinVersion:   tls.VersionTLS12,
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 				if len(verifiedChains) == 0 || len(verifiedChains[0]) == 0 {
 					return fmt.Errorf("no client certificate")
 				}

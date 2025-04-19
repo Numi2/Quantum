@@ -17,8 +17,8 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-   "time"
-   "sync"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -31,6 +31,7 @@ var (
 	storageFile = flag.String("storage-file", "transparency.log", "Path to append-only log storage")
 	sthKeyFile  = flag.String("sth-key-file", "sth_key.pem", "Path to ECDSA P-256 private key for STH signing")
 )
+
 // mutex to serialize writes to the transparency log file
 var storageMu sync.Mutex
 
@@ -55,21 +56,21 @@ func main() {
 	sugar := logger.Sugar()
 
 	// Start metrics server
-   go func() {
-       metricsMux := http.NewServeMux()
-       metricsMux.Handle("/metrics", promhttp.Handler())
-       metricsSrv := &http.Server{
-           Addr:         *metricsAddr,
-           Handler:      metricsMux,
-           ReadTimeout:  5 * time.Second,
-           WriteTimeout: 10 * time.Second,
-           IdleTimeout:  120 * time.Second,
-       }
-       sugar.Infof("starting metrics server on %s", *metricsAddr)
-       if err := metricsSrv.ListenAndServe(); err != nil {
-           sugar.Fatalf("metrics server failed: %v", err)
-       }
-   }()
+	go func() {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", promhttp.Handler())
+		metricsSrv := &http.Server{
+			Addr:         *metricsAddr,
+			Handler:      metricsMux,
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
+		sugar.Infof("starting metrics server on %s", *metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil {
+			sugar.Fatalf("metrics server failed: %v", err)
+		}
+	}()
 
 	r := chi.NewRouter()
 	r.Use(loggingMiddleware(sugar))
@@ -78,17 +79,17 @@ func main() {
 	r.Get("/ct/v1/get-entries", getEntriesHandler(sugar))
 	r.Get("/ct/v1/get-proof-by-hash", getProofHandler(sugar))
 
-   sugar.Infof("starting transparency log server on %s", *addr)
-   server := &http.Server{
-       Addr:         *addr,
-       Handler:      r,
-       ReadTimeout:  5 * time.Second,
-       WriteTimeout: 10 * time.Second,
-       IdleTimeout:  120 * time.Second,
-   }
-   if err := server.ListenAndServe(); err != nil {
-       sugar.Fatalf("server failed: %v", err)
-   }
+	sugar.Infof("starting transparency log server on %s", *addr)
+	server := &http.Server{
+		Addr:         *addr,
+		Handler:      r,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
+		sugar.Fatalf("server failed: %v", err)
+	}
 }
 
 // loggingMiddleware logs requests as structured JSON
@@ -108,18 +109,18 @@ func loggingMiddleware(logger *zap.SugaredLogger) func(next http.Handler) http.H
 }
 
 func addChainHandler(logger *zap.SugaredLogger) http.HandlerFunc {
-   return func(w http.ResponseWriter, r *http.Request) {
-       defer r.Body.Close()
-       var entry LogEntry
-       if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var entry LogEntry
+		if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
 			http.Error(w, "invalid payload", http.StatusBadRequest)
 			logger.Warnf("invalid add-chain payload: %v", err)
 			return
 		}
-       entry.Timestamp = time.Now().Unix()
-       storageMu.Lock()
-       defer storageMu.Unlock()
-       f, err := os.OpenFile(*storageFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		entry.Timestamp = time.Now().Unix()
+		storageMu.Lock()
+		defer storageMu.Unlock()
+		f, err := os.OpenFile(*storageFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			logger.Errorf("failed to open storage file: %v", err)

@@ -2,6 +2,7 @@ module pqcpki/ca-service
 
 go 1.24.2
 
+replace github.com/ThalesGroup/crypto11 => github.com/ThalesGroup/crypto11 v1.4.1
 
 require (
 	github.com/ThalesGroup/crypto11 v1.4.1
@@ -19,6 +20,7 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/stretchr/testify v1.10.0 // indirect
 	github.com/thales-e-security/pool v0.0.2 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
