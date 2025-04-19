@@ -6,8 +6,8 @@ A set of Go-based services that implement a post-quantum cryptography (PQC) awar
 
 This repository is structured as a monorepo of related services:
 
-- **acme-server**: ACME v2 compliant server providing directory, nonce, account, order, challenge (HTTP-01), finalize, and certificate issuance endpoints.
-- **ca-service**: Certificate Authority service that signs Certificate Signing Requests (CSRs) using ECDSA P-256 (for demonstration; can be swapped out for PQC algorithms).
+- **acme-server**: ACME v2 compliant server providing directory, nonce, account, order, challenge (HTTP-01), finalize, and certificate issuance endpoints. **This server now supports client authentication using JWS signatures based on the EdDilithium2 PQC algorithm (via CIRCL)** in addition to traditional ECDSA and RSA.
+- **ca-service**: Certificate Authority service that signs Certificate Signing Requests (CSRs). It uses an ECDSA P-256 keypair for its own root certificate and TLS identity, but **uses an EdDilithium2 keypair (from the CIRCL library) to sign certificates issued via the `/sign` endpoint**. This demonstrates a hybrid approach where the CA's identity remains classical while issued artifacts use PQC signatures.
 - **cli**: Command-line client for interacting with the ACME server, including account creation, order placement, and certificate retrieval.
 - **device-service**: IoT device certificate issuance service.
 - **signing-service**: Generic signing service for signing arbitrary payloads.
@@ -80,6 +80,8 @@ Each service can be run independently. In separate terminals:
    cd acme-server
    # Run database migrations
    psql "$DATABASE_URL" -f migrations/0001_create_acme_tables.up.sql
+   # Run with experimental PQ KEM support (e.g., Kyber) enabled
+   export GODEBUG=tls13kem=1 
    go run main.go
    ```
    Default port: 4000
@@ -136,38 +138,4 @@ Each service can be run independently. In separate terminals:
    ```
 
 8. **Retrieve Certificate**  
-   ```bash
-   curl http://localhost:$PORT_ACME/acme/cert/<orderID> -o cert.pem
    ```
-
-## Development & Testing
-
-- **Vet all services**  
-  ```bash
-  for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
-    echo "Vetting $d"
-    (cd "$d" && go vet ./...)
-  done
-  ```
-
-- **Run tests** (if available)  
-  ```bash
-  go test ./...
-  ```
-
-## Contributing
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository and create a feature branch:  
-   `git checkout -b feature/your-feature`
-
-2. Commit your changes with clear messages:  
-   `git commit -m "Add new feature"`
-
-3. Push to your branch and open a Pull Request:  
-   `git push origin feature/your-feature`
-
-## License
-
-This project is licensed under the [Apache 2.0 License](LICENSE).

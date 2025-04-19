@@ -6,7 +6,8 @@ replace github.com/ThalesGroup/crypto11 => github.com/ThalesGroup/crypto11 v1.4.
 
 require (
 	github.com/ThalesGroup/crypto11 v1.4.1
-	github.com/prometheus/client_golang v1.22.0
+	github.com/cloudflare/circl v1.6.1
+	github.com/prometheus/client_golang v1.14.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.37.0
 )

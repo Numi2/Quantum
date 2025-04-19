@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -24,6 +25,8 @@ import (
 	"sync"
 
 	"time"
+
+	eddilithium2 "github.com/cloudflare/circl/sign/eddilithium2"
 )
 
 const (
@@ -33,8 +36,10 @@ const (
 )
 
 var (
-	caCert *x509.Certificate
-	caKey  *ecdsa.PrivateKey
+	caCert   *x509.Certificate
+	caKey    *ecdsa.PrivateKey
+	caPqPriv *eddilithium2.PrivateKey
+	caPqPub  *eddilithium2.PublicKey
 )
 
 // revocations tracks revoked certificate serials
@@ -119,6 +124,37 @@ func main() {
 			log.Fatalf("CA key is not ECDSA")
 		}
 		caKey = priv
+	}
+	// Load or generate PQC Dilithium2 key for signing issued certs
+	pqcPath := filepath.Join(keyDir, "ca-pqc-key.bin")
+	if data, err := os.ReadFile(pqcPath); err == nil {
+		priv := new(eddilithium2.PrivateKey)
+		if err := priv.UnmarshalBinary(data); err != nil {
+			sugar.Fatalf("failed to parse PQC key: %v", err)
+		}
+		caPqPriv = priv
+		caPqPub = priv.Public().(*eddilithium2.PublicKey)
+		sugar.Info("Loaded existing EdDilithium2 signing key")
+	} else if errors.Is(err, os.ErrNotExist) {
+		pub, priv, err := eddilithium2.GenerateKey(rand.Reader)
+		if err != nil {
+			sugar.Fatalf("failed to generate PQC key: %v", err)
+		}
+		data, err := priv.MarshalBinary()
+		if err != nil {
+			sugar.Fatalf("failed to marshal PQC key: %v", err)
+		}
+		if err := os.WriteFile(pqcPath+".tmp", data, 0600); err != nil {
+			sugar.Fatalf("failed to write PQC key: %v", err)
+		}
+		if err := os.Rename(pqcPath+".tmp", pqcPath); err != nil {
+			sugar.Fatalf("failed to store PQC key: %v", err)
+		}
+		caPqPriv = priv
+		caPqPub = pub
+		sugar.Info("Generated new EdDilithium2 signing key")
+	} else {
+		sugar.Fatalf("Failed to read PQC key file %s: %v", pqcPath, err)
 	}
 	// Load or generate CA certificate
 	cert, err := ks.GetCertificate("ca-cert")
@@ -296,7 +332,7 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
 		CRLDistributionPoints: []string{fmt.Sprintf("https://%s/crl", r.Host)},
 		OCSPServer:            []string{fmt.Sprintf("https://%s/ocsp", r.Host)},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, &tpl, caCert, csr.PublicKey, caKey)
+	der, err := x509.CreateCertificate(rand.Reader, &tpl, caCert, csr.PublicKey, caPqPriv)
 	if err != nil {
 		http.Error(w, "failed to create certificate", http.StatusInternalServerError)
 		return

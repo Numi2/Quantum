@@ -1,35 +1,37 @@
 package main
 
 import (
-   "bytes"
-   "crypto"
-   "crypto/ecdsa"
-   "crypto/elliptic"
-   "crypto/rand"
-   rsa "crypto/rsa"
-   "crypto/sha256"
-   "crypto/tls"
-   "crypto/x509"
-   "crypto/x509/pkix"
-   "database/sql"
-   "encoding/base64"
-   "encoding/json"
-   "encoding/pem"
-   "errors"
-   "fmt"
-   _ "github.com/lib/pq"
-   "io"
-   "log"
-   "math/big"
-   "net/http"
-   "os"
-   "strings"
-   "sync"
-   "time"
+	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	rsa "crypto/rsa"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math/big"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
 
-   "golang.org/x/crypto/ocsp"
+	_ "github.com/lib/pq"
 
-   jose "gopkg.in/square/go-jose.v2"
+	"golang.org/x/crypto/ocsp"
+
+	eddilithium2 "github.com/cloudflare/circl/sign/eddilithium2"
+	jose "gopkg.in/square/go-jose.v2"
 )
 
 // getEnv returns environment variable or default
@@ -42,39 +44,39 @@ func getEnv(key, def string) string {
 
 // fetchOCSPStaple retrieves an OCSP staple for the given certificate using the issuer certificate.
 func fetchOCSPStaple(cert *x509.Certificate, issuer *x509.Certificate) ([]byte, error) {
-   if len(cert.OCSPServer) == 0 {
-       return nil, fmt.Errorf("no OCSP server specified in certificate")
-   }
-   reqBytes, err := ocsp.CreateRequest(cert, issuer, nil)
-   if err != nil {
-       return nil, fmt.Errorf("create OCSP request: %v", err)
-   }
-   ocspURL := cert.OCSPServer[0]
-   pool := x509.NewCertPool()
-   pool.AddCert(issuer)
-   client := &http.Client{Transport: &http.Transport{
-       TLSClientConfig: &tls.Config{RootCAs: pool},
-   }}
-   resp, err := client.Post(ocspURL, "application/ocsp-request", bytes.NewReader(reqBytes))
-   if err != nil {
-       return nil, fmt.Errorf("OCSP request failed: %v", err)
-   }
-   defer resp.Body.Close()
-   if resp.StatusCode != http.StatusOK {
-       return nil, fmt.Errorf("OCSP response status: %s", resp.Status)
-   }
-   respBytes, err := io.ReadAll(resp.Body)
-   if err != nil {
-       return nil, fmt.Errorf("read OCSP response: %v", err)
-   }
-   parsed, err := ocsp.ParseResponse(respBytes, issuer)
-   if err != nil {
-       return nil, fmt.Errorf("parse OCSP response: %v", err)
-   }
-   if parsed.Status != ocsp.Good {
-       return nil, fmt.Errorf("OCSP status is not good: %v", parsed.Status)
-   }
-   return respBytes, nil
+	if len(cert.OCSPServer) == 0 {
+		return nil, fmt.Errorf("no OCSP server specified in certificate")
+	}
+	reqBytes, err := ocsp.CreateRequest(cert, issuer, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create OCSP request: %v", err)
+	}
+	ocspURL := cert.OCSPServer[0]
+	pool := x509.NewCertPool()
+	pool.AddCert(issuer)
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: pool},
+	}}
+	resp, err := client.Post(ocspURL, "application/ocsp-request", bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, fmt.Errorf("OCSP request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OCSP response status: %s", resp.Status)
+	}
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read OCSP response: %v", err)
+	}
+	parsed, err := ocsp.ParseResponse(respBytes, issuer)
+	if err != nil {
+		return nil, fmt.Errorf("parse OCSP response: %v", err)
+	}
+	if parsed.Status != ocsp.Good {
+		return nil, fmt.Errorf("OCSP status is not good: %v", parsed.Status)
+	}
+	return respBytes, nil
 }
 
 // CA certificate file used to verify CA service
@@ -107,11 +109,11 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 		http.Error(w, "invalid JWS request", http.StatusBadRequest)
 		return nil, "", nil, err
 	}
-   phBytes, err := base64.RawURLEncoding.DecodeString(req.Protected)
-   if err != nil {
-       http.Error(w, "invalid protected header encoding", http.StatusBadRequest)
-       return nil, "", nil, err
-   }
+	phBytes, err := base64.RawURLEncoding.DecodeString(req.Protected)
+	if err != nil {
+		http.Error(w, "invalid protected header encoding", http.StatusBadRequest)
+		return nil, "", nil, err
+	}
 	var ph struct {
 		Alg   string                 `json:"alg"`
 		Nonce string                 `json:"nonce"`
@@ -119,37 +121,37 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 		Jwk   map[string]interface{} `json:"jwk,omitempty"`
 		Kid   string                 `json:"kid,omitempty"`
 	}
-   if err := json.Unmarshal(phBytes, &ph); err != nil {
-       http.Error(w, "invalid protected header", http.StatusBadRequest)
-       return nil, "", nil, err
-   }
+	if err := json.Unmarshal(phBytes, &ph); err != nil {
+		http.Error(w, "invalid protected header", http.StatusBadRequest)
+		return nil, "", nil, err
+	}
 	// Validate nonce
 	noncesMutex.Lock()
-   if !validNonces[ph.Nonce] {
-       noncesMutex.Unlock()
-       http.Error(w, "invalid nonce", http.StatusBadRequest)
-       return nil, "", nil, fmt.Errorf("invalid nonce")
-   }
+	if !validNonces[ph.Nonce] {
+		noncesMutex.Unlock()
+		http.Error(w, "invalid nonce", http.StatusBadRequest)
+		return nil, "", nil, fmt.Errorf("invalid nonce")
+	}
 	delete(validNonces, ph.Nonce)
 	noncesMutex.Unlock()
 	// Validate URL
 	expectedURL := fmt.Sprintf("https://%s%s", r.Host, r.URL.Path)
-   if ph.URL != expectedURL {
-       http.Error(w, "invalid url in protected header", http.StatusBadRequest)
-       return nil, "", nil, fmt.Errorf("invalid url")
-   }
+	if ph.URL != expectedURL {
+		http.Error(w, "invalid url in protected header", http.StatusBadRequest)
+		return nil, "", nil, fmt.Errorf("invalid url")
+	}
 	// Decode payload
 	payload, err = base64.RawURLEncoding.DecodeString(req.Payload)
-   if err != nil {
-       http.Error(w, "invalid payload encoding", http.StatusBadRequest)
-       return nil, "", nil, err
-   }
+	if err != nil {
+		http.Error(w, "invalid payload encoding", http.StatusBadRequest)
+		return nil, "", nil, err
+	}
 	signingInput := []byte(req.Protected + "." + req.Payload)
 	sigBytes, err := base64.RawURLEncoding.DecodeString(req.Signature)
-   if err != nil {
-       http.Error(w, "invalid signature encoding", http.StatusBadRequest)
-       return nil, "", nil, err
-   }
+	if err != nil {
+		http.Error(w, "invalid signature encoding", http.StatusBadRequest)
+		return nil, "", nil, err
+	}
 	// Determine public key
 	var pubKey interface{}
 	if ph.Jwk != nil {
@@ -204,9 +206,18 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return payload, accountURL, jwk, errors.New("ecdsa verification failed")
 		}
-   default:
-       http.Error(w, "unsupported key type", http.StatusBadRequest)
-       return nil, "", nil, fmt.Errorf("unsupported key type")
+	case *eddilithium2.PublicKey:
+		// Note: Assumes go-jose.v2 correctly marshals/unmarshals the CIRCL key.
+		// EdDilithium2 does not use SHA256 for hashing internally, it takes the message directly.
+		if !eddilithium2.Verify(key, signingInput, sigBytes) {
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return payload, accountURL, jwk, errors.New("eddilithium2 verification failed")
+		}
+	default:
+		// Check the type of the key if debugging is needed
+		// log.Printf("Unsupported key type: %T", pubKey)
+		http.Error(w, "unsupported key type", http.StatusBadRequest)
+		return nil, "", nil, fmt.Errorf("unsupported key type: %T", pubKey)
 	}
 	return payload, accountURL, jwk, nil
 }
@@ -290,15 +301,15 @@ func main() {
 			log.Fatalf("failed to load CA root")
 		}
 		httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-       resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
-       if err != nil {
-           log.Fatalf("CSR sign request failed: %v", err)
-       }
-       defer resp.Body.Close()
-       body, err := io.ReadAll(resp.Body)
-       if err != nil {
-           log.Fatalf("read CA response: %v", err)
-       }
+		resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
+		if err != nil {
+			log.Fatalf("CSR sign request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatalf("read CA response: %v", err)
+		}
 		// parse leaf certificate
 		block, _ := pem.Decode(body)
 		if block == nil || block.Type != "CERTIFICATE" {
@@ -317,19 +328,19 @@ func main() {
 	}
 	// build TLS key pair for server and client
 	tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: privKey}
-   // load and parse CA certificate for OCSP stapling
-   caCertPEM, err := os.ReadFile(caCertFile)
-   if err != nil {
-       log.Fatalf("read CA cert: %v", err)
-   }
-   block, _ := pem.Decode(caCertPEM)
-   if block == nil || block.Type != "CERTIFICATE" {
-       log.Fatalf("invalid CA certificate PEM")
-   }
-   caCert, err := x509.ParseCertificate(block.Bytes)
-   if err != nil {
-       log.Fatalf("parse CA certificate: %v", err)
-   }
+	// load and parse CA certificate for OCSP stapling
+	caCertPEM, err := os.ReadFile(caCertFile)
+	if err != nil {
+		log.Fatalf("read CA cert: %v", err)
+	}
+	block, _ := pem.Decode(caCertPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		log.Fatalf("invalid CA certificate PEM")
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		log.Fatalf("parse CA certificate: %v", err)
+	}
 
 	// initial OCSP stapling for server certificate
 	// initial OCSP stapling for server certificate
@@ -348,37 +359,37 @@ func main() {
 		log.Fatalf("failed to load CA root")
 	}
 	httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}}}}
-   // register handlers with customizable timeouts
-   mux := http.NewServeMux()
-   mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-   mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-       if certObj == nil || ks == nil {
-           http.Error(w, "not ready", http.StatusServiceUnavailable)
-           return
-       }
-       w.WriteHeader(http.StatusOK)
-   })
-   mux.HandleFunc("/directory", directoryHandler)
-   mux.HandleFunc("/acme/new-nonce", newNonceHandler)
-   mux.HandleFunc("/acme/new-account", newAccountHandler)
-   mux.HandleFunc("/acme/new-order", newOrderHandler)
-   mux.HandleFunc("/acme/challenge/", challengeHandler)
-   mux.HandleFunc("/acme/finalize/", finalizeHandler)
-   mux.HandleFunc("/acme/cert/", certHandler)
-   mux.HandleFunc("/acme/revoke-cert", revokeCertHandler)
-   mux.HandleFunc("/acme/key-change", stubHandler)
-   // start HTTPS server with timeouts and OCSP stapling
-   server := &http.Server{
-       Addr:         addr,
-       Handler:      mux,
-       ReadTimeout:  5 * time.Second,
-       WriteTimeout: 10 * time.Second,
-       IdleTimeout:  120 * time.Second,
-       TLSConfig: &tls.Config{
-           Certificates: []tls.Certificate{tlsCert},
-           MinVersion:   tls.VersionTLS12,
-       },
-   }
+	// register handlers with customizable timeouts
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if certObj == nil || ks == nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/directory", directoryHandler)
+	mux.HandleFunc("/acme/new-nonce", newNonceHandler)
+	mux.HandleFunc("/acme/new-account", newAccountHandler)
+	mux.HandleFunc("/acme/new-order", newOrderHandler)
+	mux.HandleFunc("/acme/challenge/", challengeHandler)
+	mux.HandleFunc("/acme/finalize/", finalizeHandler)
+	mux.HandleFunc("/acme/cert/", certHandler)
+	mux.HandleFunc("/acme/revoke-cert", revokeCertHandler)
+	mux.HandleFunc("/acme/key-change", stubHandler)
+	// start HTTPS server with timeouts and OCSP stapling
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			MinVersion:   tls.VersionTLS12,
+		},
+	}
 	// periodic OCSP staple refresh
 	go func() {
 		for {
@@ -527,8 +538,8 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 
 // newOrderHandler creates a new order (expects JWS)
 func newOrderHandler(w http.ResponseWriter, r *http.Request) {
-		// verify JWS and extract payload
-		payload, _, _, err := verifyJWS(w, r)
+	// verify JWS and extract payload
+	payload, _, _, err := verifyJWS(w, r)
 	if err != nil {
 		return
 	}
