@@ -60,7 +60,7 @@ func sbomHandler(w http.ResponseWriter, r *http.Request, id string) {
    row := db.QueryRow(`SELECT sbom FROM log_entries WHERE id = ?`, id)
    var sbom string
    if err := row.Scan(&sbom); err != nil || sbom == "" {
-       http.Error(w, "SBOM not found", http.StatusNotFound)
+       writeError(w, http.StatusNotFound, "SBOM not found")
        return
    }
    w.Header().Set("Content-Type", "application/json")
@@ -72,7 +72,7 @@ func provenanceHandler(w http.ResponseWriter, r *http.Request, id string) {
    row := db.QueryRow(`SELECT provenance FROM log_entries WHERE id = ?`, id)
    var prov string
    if err := row.Scan(&prov); err != nil || prov == "" {
-       http.Error(w, "provenance not found", http.StatusNotFound)
+       writeError(w, http.StatusNotFound, "provenance not found")
        return
    }
    w.Header().Set("Content-Type", "application/json")
@@ -139,11 +139,19 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func main() {
+   // initialize structured logger
+   logger, err := zap.NewProduction()
+   if err != nil {
+       log.Fatalf("failed to initialize logger: %v", err)
+   }
+   defer logger.Sync()
+   sugar = logger.Sugar()
+
    // initialize database
    var err error
    db, err = sql.Open("sqlite3", dbDSN)
    if err != nil {
-       log.Fatalf("failed to open database: %v", err)
+       sugar.Fatalf("failed to open database: %v", err)
    }
    defer db.Close()
 
@@ -210,7 +218,7 @@ func main() {
    }
    // load or generate PQC Dilithium2 key
    pqcPath := filepath.Join(keyDir, "pqc-key.bin")
-   if data, err := ioutil.ReadFile(pqcPath); err == nil {
+   if data, err := os.ReadFile(pqcPath); err == nil {
        priv := new(eddilithium2.PrivateKey)
        if err := priv.UnmarshalBinary(data); err != nil {
            log.Fatalf("failed to parse PQC key: %v", err)
@@ -226,7 +234,7 @@ func main() {
        if err != nil {
            log.Fatalf("failed to marshal PQC key: %v", err)
        }
-       if err := ioutil.WriteFile(pqcPath+".tmp", data, 0600); err != nil {
+       if err := os.WriteFile(pqcPath+".tmp", data, 0600); err != nil {
            log.Fatalf("failed to write PQC key: %v", err)
        }
        if err := os.Rename(pqcPath+".tmp", pqcPath); err != nil {
@@ -301,7 +309,7 @@ func main() {
        buf := &bytes.Buffer{}
        pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
        // request from CA
-       caCertPEM, err := ioutil.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
+       caCertPEM, err := os.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
        if err != nil {
            log.Fatalf("read CA cert: %v", err)
        }
@@ -314,7 +322,7 @@ func main() {
        if err != nil {
            log.Fatalf("CSR sign request failed: %v", err)
        }
-       body, err := ioutil.ReadAll(resp.Body)
+       body, err := io.ReadAll(resp.Body)
        resp.Body.Close()
        if err != nil {
            log.Fatalf("read CA response: %v", err)
@@ -339,7 +347,7 @@ func main() {
    // initial OCSP staple
    if reqBytes, err := ocsp.CreateRequest(certObj, caCert, &ocsp.RequestOptions{Hash: crypto.SHA1}); err == nil {
        // fetch OCSP response
-       caCertPEM, err := ioutil.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
+       caCertPEM, err := os.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
        if err != nil {
            log.Printf("warning: cannot read CA cert for OCSP: %v", err)
        } else {
@@ -352,7 +360,7 @@ func main() {
                if err != nil {
                    log.Printf("warning: OCSP request failed: %v", err)
                } else {
-                   if respBytes, err := ioutil.ReadAll(resp.Body); err == nil {
+                   if respBytes, err := io.ReadAll(resp.Body); err == nil {
                        tlsCert.OCSPStaple = respBytes
                    }
                    resp.Body.Close()
@@ -425,7 +433,7 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
 func accountInfoHandler(w http.ResponseWriter, r *http.Request) {
    accID, ok := r.Context().Value(ctxKeyAccountID).(string)
    if !ok {
-       http.Error(w, "unauthorized", http.StatusUnauthorized)
+       writeError(w, http.StatusUnauthorized, "unauthorized")
        return
    }
    row := db.QueryRow(
@@ -435,7 +443,7 @@ func accountInfoHandler(w http.ResponseWriter, r *http.Request) {
    var usageCount int
    var usageReset time.Time
    if err := row.Scan(&plan, &usageCount, &usageReset); err != nil {
-       http.Error(w, "account not found", http.StatusNotFound)
+       writeError(w, http.StatusNotFound, "account not found")
        return
    }
    w.Header().Set("Content-Type", "application/json")
@@ -484,35 +492,39 @@ func clientAuth(next http.Handler) http.Handler {
 
 // signHandler processes hybrid signing requests
 func signHandler(w http.ResponseWriter, r *http.Request) {
+   // limit body size
+   r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+   // only POST
    if r.Method != http.MethodPost {
-       http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+       w.Header().Set("Allow", http.MethodPost)
+       writeError(w, http.StatusMethodNotAllowed, "method not allowed")
        return
    }
    var req SignRequest
    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-       http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+       writeError(w, http.StatusBadRequest, "invalid JSON payload")
        return
    }
    parts := strings.SplitN(req.ArtifactHash, ":", 2)
    if len(parts) != 2 || parts[0] != "sha256" {
-       http.Error(w, "invalid hash format", http.StatusBadRequest)
+       writeError(w, http.StatusBadRequest, "invalid hash format")
        return
    }
    hashBytes, err := hex.DecodeString(parts[1])
    if err != nil {
-       http.Error(w, "invalid hash hex", http.StatusBadRequest)
+       writeError(w, http.StatusBadRequest, "invalid hash hex")
        return
    }
    sigBytes, err := ecdsa.SignASN1(rand.Reader, privateKey, hashBytes)
    if err != nil {
-       http.Error(w, "ECDSA signing error", http.StatusInternalServerError)
+       writeError(w, http.StatusInternalServerError, "ECDSA signing error")
        return
    }
    sigECDSA := base64.RawURLEncoding.EncodeToString(sigBytes)
    // hybrid PQC signing using Ed25519-Dilithium2
    pqcSigBytes, err := pqPriv.Sign(rand.Reader, hashBytes, crypto.Hash(0))
    if err != nil {
-       http.Error(w, "PQC signing error", http.StatusInternalServerError)
+       writeError(w, http.StatusInternalServerError, "PQC signing error")
        return
    }
    sigPQC := base64.RawURLEncoding.EncodeToString(pqcSigBytes)
@@ -525,10 +537,18 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
        entryID, accountID, req.ArtifactHash, req.Algorithm, hybridSig, req.SBOM, req.Provenance, ts,
    )
    if err != nil {
-       http.Error(w, "failed to record log entry", http.StatusInternalServerError)
+       writeError(w, http.StatusInternalServerError, "failed to record log entry")
        return
    }
-   resp := SignResponse{Signature: hybridSig, LogEntryURL: fmt.Sprintf("http://%s/v1/log/%s", r.Host, entryID)}
+   // build response
+   host := r.Host
+   if serviceHost != "" {
+       host = serviceHost
+   }
+   resp := SignResponse{
+       Signature:   hybridSig,
+       LogEntryURL: fmt.Sprintf("https://%s/v1/log/%s", host, entryID),
+   }
    w.Header().Set("Content-Type", "application/json")
    json.NewEncoder(w).Encode(resp)
 }

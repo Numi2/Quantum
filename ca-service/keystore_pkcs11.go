@@ -28,7 +28,7 @@ func NewPKCS11KeyStore(dir string) (KeyStore, error) {
 	cfg := &crypto11.Config{
 		Path:       module,
 		TokenLabel: tokenLabel,
-		PIN:        pin,
+		Pin:        pin,
 	}
 	ctx, err := crypto11.Configure(cfg)
 	if err != nil {
