@@ -1,82 +1,138 @@
 package main
 
 import (
-   "bytes"
-   "crypto/sha256"
-   "encoding/json"
-   "flag"
-   "fmt"
-   "io"
-   "net/http"
-   "os"
-   "time"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"time"
 )
 
+var version = "dev"
+
+// SignRequest defines the payload for a signing request.
+type SignRequest struct {
+	ArtifactHash string          `json:"artifactHash"`
+	Algorithm    string          `json:"algorithm"`
+	SBOM         json.RawMessage `json:"sbom,omitempty"`
+	Provenance   json.RawMessage `json:"provenance,omitempty"`
+}
+
+// SignResponse is the response from the signing service.
+type SignResponse struct {
+	Signature     string `json:"signature"`
+	LogEntryURL   string `json:"logEntryURL"`
+	SBOMURL       string `json:"sbomURL"`
+	ProvenanceURL string `json:"provenanceURL"`
+}
+
 func main() {
+	log.SetFlags(0)
 	artifact := flag.String("artifact", "", "Path to artifact to sign")
 	sbomPath := flag.String("sbom", "", "Path to SBOM JSON file to include")
 	provPath := flag.String("provenance", "", "Path to SLSA provenance JSON file to include")
 	server := flag.String("server", "http://localhost:7000", "Signing service URL")
 	algorithm := flag.String("algorithm", "ECDSA+Dilithium", "Signing algorithm")
+	timeout := flag.Duration("timeout", 10*time.Second, "Request timeout (e.g., 5s, 1m)")
+	insecure := flag.Bool("insecure", false, "Skip TLS certificate verification")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\nOptions:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExample:\n  %s --artifact app.bin --sbom app.sbom.json\n", os.Args[0])
+	}
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 	if *artifact == "" {
-		fmt.Println("Error: --artifact is required")
-		os.Exit(1)
+		flag.Usage()
+		os.Exit(2)
 	}
-	data, err := os.ReadFile(*artifact)
+
+	if err := run(*artifact, *sbomPath, *provPath, *server, *algorithm, *timeout, *insecure); err != nil {
+		log.Fatalf("error: %v", err)
+	}
+}
+
+// run builds the request, sends it to the signing service, and prints the result.
+func run(artifact, sbomPath, provPath, server, algorithm string, timeout time.Duration, insecure bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	artifactHash, err := computeHash(artifact)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read artifact: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to compute hash: %w", err)
 	}
-	hash := sha256.Sum256(data)
-	hashStr := fmt.Sprintf("sha256:%x", hash[:])
-	payload := map[string]string{
-		"artifactHash": hashStr,
-		"algorithm":    *algorithm,
+
+	req := SignRequest{
+		ArtifactHash: artifactHash,
+		Algorithm:    algorithm,
 	}
-	if *sbomPath != "" {
-		data, err := os.ReadFile(*sbomPath)
+
+	if sbomPath != "" {
+		b, err := os.ReadFile(sbomPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to read SBOM: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to read SBOM: %w", err)
 		}
-		payload["sbom"] = string(data)
+		req.SBOM = json.RawMessage(b)
 	}
-	if *provPath != "" {
-		data, err := os.ReadFile(*provPath)
+	if provPath != "" {
+		b, err := os.ReadFile(provPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to read provenance: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to read provenance: %w", err)
 		}
-		payload["provenance"] = string(data)
+		req.Provenance = json.RawMessage(b)
 	}
-   reqBody, err := json.Marshal(payload)
-   if err != nil {
-       fmt.Fprintf(os.Stderr, "failed to encode request payload: %v\n", err)
-       os.Exit(1)
-   }
-   client := &http.Client{Timeout: 10 * time.Second}
-   resp, err := client.Post(*server+"/v1/signatures", "application/json", bytes.NewReader(reqBody))
+
+	body, err := json.Marshal(&req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "request failed: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to marshal request payload: %w", err)
+	}
+
+	transport := http.DefaultTransport
+	if insecure {
+		transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		}
+	}
+	client := &http.Client{Transport: transport}
+
+	url := server + "/v1/signatures"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "server error: %s\n", body)
-		os.Exit(1)
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
 	}
-	var out struct {
-		Signature     string `json:"signature"`
-		LogEntryURL   string `json:"logEntryURL"`
-		SBOMURL       string `json:"sbomURL"`
-		ProvenanceURL string `json:"provenanceURL"`
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid response: %v\n", err)
-		os.Exit(1)
+
+	var out SignResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return fmt.Errorf("invalid response: %w", err)
 	}
+
 	fmt.Printf("Signature: %s\nLogEntryURL: %s\n", out.Signature, out.LogEntryURL)
 	if out.SBOMURL != "" {
 		fmt.Printf("SBOMURL: %s\n", out.SBOMURL)
@@ -84,4 +140,22 @@ func main() {
 	if out.ProvenanceURL != "" {
 		fmt.Printf("ProvenanceURL: %s\n", out.ProvenanceURL)
 	}
+
+	return nil
+}
+
+// computeHash streams the file at path through SHA-256 and returns the hash string.
+func computeHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	sum := h.Sum(nil)
+	return fmt.Sprintf("sha256:%x", sum), nil
 }

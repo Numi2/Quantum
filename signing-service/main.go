@@ -18,8 +18,6 @@ import (
    "encoding/pem"
    "fmt"
    "io"
-   "io/ioutil"
-   "log"
    "net/http"
    "os"
    "os/signal"
@@ -29,15 +27,20 @@ import (
    "time"
    "math/big"
 
+   "go.uber.org/zap"
    "github.com/ThalesGroup/crypto11"
    _ "github.com/mattn/go-sqlite3"
    eddilithium2 "github.com/cloudflare/circl/sign/eddilithium2"
+   "github.com/prometheus/client_golang/prometheus"
+   "github.com/prometheus/client_golang/prometheus/promauto"
    "github.com/prometheus/client_golang/prometheus/promhttp"
    "golang.org/x/crypto/ocsp"
 )
 
 // Free tier limit per month
 const FreeLimit = 1000
+// maxBodyBytes limits size of request bodies to prevent DoS
+const maxBodyBytes = 1 << 20 // 1MB
 
 // contextKey is type for context keys
 type contextKey string
@@ -105,17 +108,19 @@ type LogEntry struct {
 // Configuration and global variables
 var (
    // service configuration
-   addr        = getEnv("SIGNING_ADDR", ":7000")
-   dbDSN       = getEnv("DB_DSN", "signing.db")
-   keyDir      = getEnv("KEY_DIR", "keys")
-   tlsCertFile = getEnv("TLS_CERT_FILE", "signing-service-cert.pem")
-   tlsKeyFile  = getEnv("TLS_KEY_FILE", "signing-service-key.pem")
+   addr         = getEnv("SIGNING_ADDR", ":7000")
+   dbDSN        = getEnv("DB_DSN", "signing.db")
+   keyDir       = getEnv("KEY_DIR", "keys")
+   tlsCertFile  = getEnv("TLS_CERT_FILE", "signing-service-cert.pem")
+   tlsKeyFile   = getEnv("TLS_KEY_FILE", "signing-service-key.pem")
+   serviceHost  = getEnv("SERVICE_HOST", "")
 
    // global state
-   db         *sql.DB
-   privateKey *ecdsa.PrivateKey
-   pqPub      *eddilithium2.PublicKey
-   pqPriv     *eddilithium2.PrivateKey
+   db          *sql.DB
+   privateKey  *ecdsa.PrivateKey
+   pqPub       *eddilithium2.PublicKey
+   pqPriv      *eddilithium2.PrivateKey
+   sugar       *zap.SugaredLogger
 )
 
 // getEnv returns the environment variable or default value
@@ -124,6 +129,13 @@ func getEnv(key, def string) string {
        return v
    }
    return def
+}
+
+// writeError sends a JSON error response
+func writeError(w http.ResponseWriter, status int, msg string) {
+   w.Header().Set("Content-Type", "application/json")
+   w.WriteHeader(status)
+   json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func main() {

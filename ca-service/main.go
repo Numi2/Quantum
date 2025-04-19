@@ -1,33 +1,38 @@
 package main
 
 import (
-	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/json"
-	"encoding/pem"
-	"fmt"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.uber.org/zap"
-	"golang.org/x/crypto/ocsp"
-	"io"
-	"io/ioutil"
-	"log"
-	"math/big"
-	"net/http"
-	"os"
-	"path/filepath"
-	"sync"
-	"time"
+   "context"
+   "crypto/ecdsa"
+   "crypto/elliptic"
+   "crypto/rand"
+   "crypto/tls"
+   "crypto/x509"
+   "crypto/x509/pkix"
+   "encoding/json"
+   "encoding/pem"
+   "fmt"
+   "github.com/prometheus/client_golang/prometheus"
+   "github.com/prometheus/client_golang/prometheus/promauto"
+   "github.com/prometheus/client_golang/prometheus/promhttp"
+   "go.uber.org/zap"
+   "golang.org/x/crypto/ocsp"
+   "io"
+   "log"
+   "math/big"
+   "net/http"
+   "os"
+   "os/signal"
+   "path/filepath"
+   "sync"
+   "syscall"
+   "time"
 )
 
-const addr = ":5000"
+const (
+   addr = ":5000"
+   // maxBodyBytes limits the size of request bodies to prevent DoS
+   maxBodyBytes = 1 << 20 // 1MB
+)
 
 var (
 	caCert *x509.Certificate
@@ -41,24 +46,32 @@ var (
 )
 
 // revocationsFile is the persistent store for revoked certs
-var revocationsFile = func() string {
-	dir := os.Getenv("KEY_DIR")
-	if dir == "" {
-		dir = "keys"
-	}
-	return filepath.Join(dir, "revocations.json")
-}()
+// keyDir and revocationsFile are initialized in main
+var (
+   keyDir         string
+   revocationsFile string
+   serviceHost    string
+   // sugar is the global SugaredLogger
+   sugar          *zap.SugaredLogger
+)
 
 func main() {
-	// initialize structured logger
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
-	sugar := logger.Sugar()
-	// Initialize keystore (FS or PKCS#11)
-	keyDir := os.Getenv("KEY_DIR")
-	if keyDir == "" {
-		keyDir = "keys"
-	}
+   // initialize structured logger
+   logger, err := zap.NewProduction()
+   if err != nil {
+       log.Fatalf("failed to initialize logger: %v", err)
+   }
+   defer logger.Sync()
+   sugar = logger.Sugar()
+   // determine key directory, revocations file, and public host
+   keyDir = getEnv("KEY_DIR", "keys")
+   serviceHost = getEnv("SERVICE_HOST", "")
+   revocationsFile = filepath.Join(keyDir, "revocations.json")
+
+   // ensure key directory exists
+   if err := os.MkdirAll(keyDir, 0755); err != nil {
+       sugar.Fatalf("failed to create key directory %s: %v", keyDir, err)
+   }
 	storeType := getEnv("KEYSTORE_TYPE", "fs")
 	var ks KeyStore
 	switch storeType {
