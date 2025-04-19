@@ -201,18 +201,18 @@ func main() {
    if err == ErrKeyNotFound {
        priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
        if err != nil {
-           log.Fatalf("failed to generate ECDSA key: %v", err)
+           sugar.Fatalf("failed to generate ECDSA key: %v", err)
        }
        if err := ks.ImportPrivateKey("ecdsa", priv); err != nil {
-           log.Fatalf("failed to store ECDSA key: %v", err)
+           sugar.Fatalf("failed to store ECDSA key: %v", err)
        }
        privateKey = priv
    } else if err != nil {
-       log.Fatalf("error loading ECDSA key: %v", err)
+       sugar.Fatalf("error loading ECDSA key: %v", err)
    } else {
        priv, ok := rawKey.(*ecdsa.PrivateKey)
        if !ok {
-           log.Fatalf("invalid ECDSA key type")
+           sugar.Fatalf("invalid ECDSA key type")
        }
        privateKey = priv
    }
@@ -221,24 +221,24 @@ func main() {
    if data, err := os.ReadFile(pqcPath); err == nil {
        priv := new(eddilithium2.PrivateKey)
        if err := priv.UnmarshalBinary(data); err != nil {
-           log.Fatalf("failed to parse PQC key: %v", err)
+           sugar.Fatalf("failed to parse PQC key: %v", err)
        }
        pqPriv = priv
        pqPub = priv.Public().(*eddilithium2.PublicKey)
    } else {
        pub, priv, err := eddilithium2.GenerateKey(rand.Reader)
        if err != nil {
-           log.Fatalf("failed to generate PQC key: %v", err)
+           sugar.Fatalf("failed to generate PQC key: %v", err)
        }
        data, err := priv.MarshalBinary()
        if err != nil {
-           log.Fatalf("failed to marshal PQC key: %v", err)
+           sugar.Fatalf("failed to marshal PQC key: %v", err)
        }
        if err := os.WriteFile(pqcPath+".tmp", data, 0600); err != nil {
-           log.Fatalf("failed to write PQC key: %v", err)
+           sugar.Fatalf("failed to write PQC key: %v", err)
        }
        if err := os.Rename(pqcPath+".tmp", pqcPath); err != nil {
-           log.Fatalf("failed to store PQC key: %v", err)
+           sugar.Fatalf("failed to store PQC key: %v", err)
        }
        pqPriv = priv
        pqPub = pub
@@ -275,7 +275,7 @@ func main() {
    tlsKeyDir := getEnv("KEY_DIR", "keys")
    ks, err := NewFSKeyStore(tlsKeyDir)
    if err != nil {
-       log.Fatalf("failed to init keystore: %v", err)
+       sugar.Fatalf("failed to init keystore: %v", err)
    }
    // load or generate TLS private key
    rawTlsKey, err := ks.GetPrivateKey("tls")
@@ -283,19 +283,19 @@ func main() {
    if err == ErrKeyNotFound {
        p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
        if err != nil {
-           log.Fatalf("generate TLS key: %v", err)
+           sugar.Fatalf("generate TLS key: %v", err)
        }
        if err := ks.ImportPrivateKey("tls", p); err != nil {
-           log.Fatalf("store TLS key: %v", err)
+           sugar.Fatalf("store TLS key: %v", err)
        }
        tlsPriv = p
    } else if err != nil {
-       log.Fatalf("load TLS key: %v", err)
+       sugar.Fatalf("load TLS key: %v", err)
    } else {
        var ok bool
        tlsPriv, ok = rawTlsKey.(*ecdsa.PrivateKey)
        if !ok {
-           log.Fatalf("invalid TLS key type")
+           sugar.Fatalf("invalid TLS key type")
        }
    }
    // load or request TLS certificate from CA
@@ -304,43 +304,43 @@ func main() {
        csrTmpl := x509.CertificateRequest{Subject: pkix.Name{CommonName: "signing-service"}}
        csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, tlsPriv)
        if err != nil {
-           log.Fatalf("create CSR: %v", err)
+           sugar.Fatalf("create CSR: %v", err)
        }
        buf := &bytes.Buffer{}
        pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
        // request from CA
        caCertPEM, err := os.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
        if err != nil {
-           log.Fatalf("read CA cert: %v", err)
+           sugar.Fatalf("read CA cert: %v", err)
        }
        pool := x509.NewCertPool()
        if !pool.AppendCertsFromPEM(caCertPEM) {
-           log.Fatalf("failed to load CA root")
+           sugar.Fatalf("failed to load CA root")
        }
        client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
        resp, err := client.Post(getEnv("CA_SIGN_URL", "https://localhost:5000/sign"), "application/x-pem-file", buf)
        if err != nil {
-           log.Fatalf("CSR sign request failed: %v", err)
+           sugar.Fatalf("CSR sign request failed: %v", err)
        }
        body, err := io.ReadAll(resp.Body)
        resp.Body.Close()
        if err != nil {
-           log.Fatalf("read CA response: %v", err)
+           sugar.Fatalf("read CA response: %v", err)
        }
        block, _ := pem.Decode(body)
        if block == nil || block.Type != "CERTIFICATE" {
-           log.Fatalf("invalid certificate PEM from CA")
+           sugar.Fatalf("invalid certificate PEM from CA")
        }
        cert, err := x509.ParseCertificate(block.Bytes)
        if err != nil {
-           log.Fatalf("parse certificate: %v", err)
+           sugar.Fatalf("parse certificate: %v", err)
        }
        if err := ks.ImportCertificate("tls", cert); err != nil {
-           log.Fatalf("store TLS cert: %v", err)
+           sugar.Fatalf("store TLS cert: %v", err)
        }
        certObj = cert
    } else if err != nil {
-       log.Fatalf("load TLS cert: %v", err)
+       sugar.Fatalf("load TLS cert: %v", err)
    }
    // prepare TLS certificate
    tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: tlsPriv}
@@ -349,16 +349,16 @@ func main() {
        // fetch OCSP response
        caCertPEM, err := os.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
        if err != nil {
-           log.Printf("warning: cannot read CA cert for OCSP: %v", err)
+           sugar.Warnf("cannot read CA cert for OCSP: %v", err)
        } else {
            poolOCSP := x509.NewCertPool()
            if !poolOCSP.AppendCertsFromPEM(caCertPEM) {
-               log.Printf("warning: failed to append CA cert for OCSP")
+               sugar.Warnf("failed to append CA cert for OCSP")
            } else {
                client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: poolOCSP}}}
                resp, err := client.Post(getEnv("CA_OCSP_URL", "https://localhost:5000/ocsp"), "application/ocsp-request", bytes.NewReader(reqBytes))
                if err != nil {
-                   log.Printf("warning: OCSP request failed: %v", err)
+                   sugar.Warnf("OCSP request failed: %v", err)
                } else {
                    if respBytes, err := io.ReadAll(resp.Body); err == nil {
                        tlsCert.OCSPStaple = respBytes
@@ -378,9 +378,9 @@ func main() {
        TLSConfig:    &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12},
    }
    go func() {
-       log.Printf("Signing service listening on %s (HTTPS)", addr)
+       sugar.Infof("Signing service listening on %s (HTTPS)", addr)
        if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-           log.Fatalf("server error: %v", err)
+           sugar.Fatalf("server error: %v", err)
        }
    }()
 
@@ -388,13 +388,13 @@ func main() {
    quit := make(chan os.Signal, 1)
    signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
    <-quit
-   log.Println("shutting down...")
+   sugar.Infof("shutting down...")
    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
    defer cancel()
    if err := server.Shutdown(ctx); err != nil {
-       log.Fatalf("shutdown error: %v", err)
+       sugar.Fatalf("shutdown error: %v", err)
    }
-   log.Println("service stopped")
+   sugar.Infof("service stopped")
 }
 
 // accountsHandler registers a new free-tier account

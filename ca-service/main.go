@@ -16,7 +16,8 @@ import (
    "github.com/prometheus/client_golang/prometheus/promhttp"
    "go.uber.org/zap"
    "golang.org/x/crypto/ocsp"
-   "io"
+  "io"
+  "io/ioutil"
    "log"
    "math/big"
    "net/http"
@@ -47,13 +48,20 @@ var (
 
 // revocationsFile is the persistent store for revoked certs
 // keyDir and revocationsFile are initialized in main
-var (
+ var (
    keyDir         string
    revocationsFile string
    serviceHost    string
    // sugar is the global SugaredLogger
    sugar          *zap.SugaredLogger
-)
+ )
+// getEnv returns the value of the environment variable named by key or defaultVal if not set or empty.
+func getEnv(key, defaultVal string) string {
+   if value, exists := os.LookupEnv(key); exists && value != "" {
+       return value
+   }
+   return defaultVal
+}
 
 func main() {
    // initialize structured logger
