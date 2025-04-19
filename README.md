@@ -20,6 +20,34 @@ This repository is structured as a monorepo of related services:
 - `psql` client for running migrations  
 - Docker (optional, for containerized deployment)
 
+## Building the Services
+
+All services can be built using Go's build command. The binaries will be placed in the `bin` directory:
+
+```bash
+# Create the bin directory
+mkdir -p bin
+
+# Build all services
+go build -o bin/ca-service ./ca-service
+go build -o bin/acme-server ./acme-server
+go build -o bin/device-service ./device-service
+go build -o bin/signing-service ./signing-service
+go build -o bin/cli ./cli
+go build -o bin/transparency-log-service ./transparency-log-service
+```
+
+The built binaries will be available in the `bin` directory with the following structure:
+```
+bin/
+├── acme-server
+├── ca-service
+├── cli
+├── device-service
+├── signing-service
+└── transparency-log-service
+```
+
 ## Getting Started
 
 1. Clone the repository  

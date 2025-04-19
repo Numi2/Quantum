@@ -55,12 +55,13 @@ jobs:
 
       - name: Build services
         run: |
-          go build ./ca-service
-          go build ./acme-server
-          go build ./device-service
-          go build ./signing-service
-          go build ./cli
-          go build ./transparency-log-service
+          mkdir -p bin
+          go build -o bin/ca-service ./ca-service
+          go build -o bin/acme-server ./acme-server
+          go build -o bin/device-service ./device-service
+          go build -o bin/signing-service ./signing-service
+          go build -o bin/cli ./cli
+          go build -o bin/transparency-log-service ./transparency-log-service
 
       - name: Run tests
         run: go test ./...
