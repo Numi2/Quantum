@@ -28,7 +28,7 @@ func init() {
 	// migrate schema
 	schemas := []string{
 		`CREATE TABLE accounts (id TEXT PRIMARY KEY, api_key TEXT UNIQUE NOT NULL, plan TEXT NOT NULL, usage_count INTEGER NOT NULL, usage_reset DATETIME NOT NULL);`,
-		`CREATE TABLE log_entries (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, artifact_hash TEXT NOT NULL, algorithm TEXT NOT NULL, signature TEXT NOT NULL, timestamp DATETIME NOT NULL, FOREIGN KEY(account_id) REFERENCES accounts(id));`,
+		`CREATE TABLE log_entries (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, artifact_hash TEXT NOT NULL, algorithm TEXT NOT NULL, signature TEXT NOT NULL, sbom TEXT, provenance TEXT, timestamp DATETIME NOT NULL, FOREIGN KEY(account_id) REFERENCES accounts(id));`,
 	}
 	for _, s := range schemas {
 		if _, err := db.Exec(s); err != nil {
@@ -51,7 +51,7 @@ func init() {
 func TestAccountAndSignFlow(t *testing.T) {
 	// setup HTTP handlers
 	mux := http.NewServeMux()
-	mux.Handle("/v1/accounts", clientAuth(http.HandlerFunc(accountsHandler)))
+	mux.HandleFunc("/v1/accounts", accountsHandler) // No auth required for account creation
 	mux.Handle("/v1/accounts/", clientAuth(http.HandlerFunc(accountInfoHandler)))
 	mux.Handle("/v1/signatures", clientAuth(http.HandlerFunc(signHandler)))
 	mux.Handle("/v1/log/", clientAuth(http.HandlerFunc(logHandler)))
@@ -117,7 +117,10 @@ func TestAccountAndSignFlow(t *testing.T) {
 	}
 
 	// 4. Retrieve log entry
-	resp4, err := http.Get(signResp.LogEntryURL)
+	logURL := strings.Replace(signResp.LogEntryURL, "https://", "http://", 1)
+	req4, _ := http.NewRequest("GET", logURL, nil)
+	req4.Header.Set("X-API-Key", apiKey)
+	resp4, err := http.DefaultClient.Do(req4)
 	if err != nil {
 		t.Fatalf("log entry request failed: %v", err)
 	}
