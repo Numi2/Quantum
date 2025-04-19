@@ -462,7 +462,7 @@ func clientAuth(next http.Handler) http.Handler {
    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
        key := r.Header.Get("X-API-Key")
        if key == "" {
-           http.Error(w, "unauthorized", http.StatusUnauthorized)
+           writeError(w, http.StatusUnauthorized, "unauthorized")
            return
        }
        row := db.QueryRow(

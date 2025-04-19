@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
    "github.com/ThalesGroup/crypto11"
 )
