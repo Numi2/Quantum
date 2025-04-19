@@ -55,7 +55,7 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "unable to read request", http.StatusBadRequest)
-		return
+		return nil, "", nil, err
 	}
 	defer r.Body.Close()
 	var req struct {
@@ -67,11 +67,11 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 		http.Error(w, "invalid JWS request", http.StatusBadRequest)
 		return nil, "", nil, err
 	}
-	phBytes, err := base64.RawURLEncoding.DecodeString(req.Protected)
-	if err != nil {
-		http.Error(w, "invalid protected header encoding", http.StatusBadRequest)
-		return
-	}
+   phBytes, err := base64.RawURLEncoding.DecodeString(req.Protected)
+   if err != nil {
+       http.Error(w, "invalid protected header encoding", http.StatusBadRequest)
+       return nil, "", nil, err
+   }
 	var ph struct {
 		Alg   string                 `json:"alg"`
 		Nonce string                 `json:"nonce"`
@@ -79,37 +79,37 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 		Jwk   map[string]interface{} `json:"jwk,omitempty"`
 		Kid   string                 `json:"kid,omitempty"`
 	}
-	if err := json.Unmarshal(phBytes, &ph); err != nil {
-		http.Error(w, "invalid protected header", http.StatusBadRequest)
-		return
-	}
+   if err := json.Unmarshal(phBytes, &ph); err != nil {
+       http.Error(w, "invalid protected header", http.StatusBadRequest)
+       return nil, "", nil, err
+   }
 	// Validate nonce
 	noncesMutex.Lock()
-	if !validNonces[ph.Nonce] {
-		noncesMutex.Unlock()
-		http.Error(w, "invalid nonce", http.StatusBadRequest)
-		return
-	}
+   if !validNonces[ph.Nonce] {
+       noncesMutex.Unlock()
+       http.Error(w, "invalid nonce", http.StatusBadRequest)
+       return nil, "", nil, fmt.Errorf("invalid nonce")
+   }
 	delete(validNonces, ph.Nonce)
 	noncesMutex.Unlock()
 	// Validate URL
 	expectedURL := fmt.Sprintf("https://%s%s", r.Host, r.URL.Path)
-	if ph.URL != expectedURL {
-		http.Error(w, "invalid url in protected header", http.StatusBadRequest)
-		return
-	}
+   if ph.URL != expectedURL {
+       http.Error(w, "invalid url in protected header", http.StatusBadRequest)
+       return nil, "", nil, fmt.Errorf("invalid url")
+   }
 	// Decode payload
 	payload, err = base64.RawURLEncoding.DecodeString(req.Payload)
-	if err != nil {
-		http.Error(w, "invalid payload encoding", http.StatusBadRequest)
-		return
-	}
+   if err != nil {
+       http.Error(w, "invalid payload encoding", http.StatusBadRequest)
+       return nil, "", nil, err
+   }
 	signingInput := []byte(req.Protected + "." + req.Payload)
 	sigBytes, err := base64.RawURLEncoding.DecodeString(req.Signature)
-	if err != nil {
-		http.Error(w, "invalid signature encoding", http.StatusBadRequest)
-		return
-	}
+   if err != nil {
+       http.Error(w, "invalid signature encoding", http.StatusBadRequest)
+       return nil, "", nil, err
+   }
 	// Determine public key
 	var pubKey interface{}
 	if ph.Jwk != nil {
@@ -164,9 +164,9 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return payload, accountURL, jwk, errors.New("ecdsa verification failed")
 		}
-	default:
-		http.Error(w, "unsupported key type", http.StatusBadRequest)
-		return
+   default:
+       http.Error(w, "unsupported key type", http.StatusBadRequest)
+       return nil, "", nil, fmt.Errorf("unsupported key type")
 	}
 	return payload, accountURL, jwk, nil
 }
