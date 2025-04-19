@@ -7,7 +7,7 @@ import (
    "fmt"
    "os"
 
-   "github.com/ThalesIgnite/crypto11"
+   "github.com/ThalesGroup/crypto11"
 )
 
 // PKCS11KeyStore wraps FSKeyStore for certificate storage and crypto11 for private keys

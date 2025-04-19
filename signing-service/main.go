@@ -28,7 +28,7 @@ import (
    "time"
    "math/big"
 
-   "github.com/ThalesIgnite/crypto11"
+   "github.com/ThalesGroup/crypto11"
    _ "github.com/mattn/go-sqlite3"
    "github.com/cloudflare/circl/sign/dilithium2"
    "github.com/prometheus/client_golang/prometheus/promhttp"

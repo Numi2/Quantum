@@ -36,7 +36,7 @@ jobs:
         run: |
           for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
             echo "Installing dependencies in $d"
-            (cd "$d" && go mod edit -replace=github.com/ThalesIgnite/crypto11=github.com/ThalesGroup/crypto11@v1.4.1 && go mod tidy)
+            (cd "$d" && go mod tidy)
           done
 
       - name: Format Go code
