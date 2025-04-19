@@ -139,4 +139,54 @@ Each service can be run independently. In separate terminals:
    ```
 
 8. **Retrieve Certificate**  
+   ```bash
+   curl -O http://localhost:$PORT_ACME/acme/cert/<orderID>
    ```
+
+## Advanced Configuration & Testing
+
+### Testing Hooks
+The ACME server supports several environment flags to simplify development and integration tests:
+
+- `SKIP_DB=true`: skip database initialization (useful for in-memory or self-signed modes).
+- `SKIP_CA=true`: bypass the external CA service and use a temporary self-signed TLS certificate.
+- `TLS_CLIENT_AUTH=[none|request|require|verify_if_given|require_and_verify]`: configure Go TLS client authentication level.
+- `KEY_DIR=<path>`: override the directory where TLS keys and certificates are stored.
+
+Example: start the server without a database or CA, and no client‑auth:
+```bash
+SKIP_DB=true SKIP_CA=true TLS_CLIENT_AUTH=none KEY_DIR=keys_test \
+  go run ./acme-server/main.go
+```
+
+### PQ Hybrid KEM Support
+By default the server prefers a post‑quantum hybrid X25519+MLKEM key exchange on TLS 1.3 connections. To enable or disable it use Go's `GODEBUG`:
+```bash
+GODEBUG="tls13kem=1" go run ./acme-server/main.go   # enable hybrid KEM
+GODEBUG="tls13kem=0" go run ./acme-server/main.go   # fall back to classical X25519 only
+```
+
+### Certificate Revocation via CRL
+The server periodically fetches a Certificate Revocation List (CRL) from the CA (`CA_CRL_URL`) and rejects revoked client certificates during mutual TLS:
+
+- CRL caches for up to 1 hour and refreshes automatically.
+- CRL signature is verified against the CA certificate.
+- Revoked certificates are rejected by serial number.
+
+## Integration Tests
+An integration test for the PQ hybrid KEM handshake is included under `acme-server/pq_kem_handshake_test.go`.
+Run it with the `integration` build tag:
+```bash
+cd acme-server
+go test -tags integration -timeout 30s
+```
+
+## Continuous Integration (CI)
+The GitHub Actions workflow (`.github/workflows/ci.yml`) now:
+
+- Builds and tests all services.
+- Generates an SBOM (`sbom.json`) via Anchore/Syft.
+- Attests SLSA provenance and writes a local Intoto predicate in `attestations/sbom.intoto.jsonl`.
+- Uploads both the SBOM and provenance file as workflow artifacts.
+
+This end‑to‑end pipeline ensures reproducible builds, provable supply chain integrity, and easy auditing.

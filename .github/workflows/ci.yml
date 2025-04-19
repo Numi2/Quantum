@@ -91,6 +91,9 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: sbom.json
+          mode: local
+          predicate-directory: attestations
+          predicate-file: sbom.intoto.jsonl
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
@@ -103,3 +106,4 @@ jobs:
         with:
           name: provenance
           path: attestations/*.intoto.jsonl
+          if-no-files-found: ignore
