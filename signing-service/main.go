@@ -30,13 +30,9 @@ import (
 
    "github.com/ThalesGroup/crypto11"
    _ "github.com/mattn/go-sqlite3"
-   "github.com/cloudflare/circl/sign/dilithium2"
+   eddilithium2 "github.com/cloudflare/circl/sign/eddilithium2"
    "github.com/prometheus/client_golang/prometheus/promhttp"
    "golang.org/x/crypto/ocsp"
-)
-   _ "github.com/mattn/go-sqlite3"
-   "github.com/cloudflare/circl/sign/dilithium2"
-   "github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Free tier limit per month
@@ -117,8 +113,8 @@ var (
    // global state
    db         *sql.DB
    privateKey *ecdsa.PrivateKey
-   pqPub      dilithium2.PublicKey
-   pqPriv     dilithium2.PrivateKey
+   pqPub      *eddilithium2.PublicKey
+   pqPriv     *eddilithium2.PrivateKey
 )
 
 // getEnv returns the environment variable or default value
@@ -202,14 +198,14 @@ func main() {
    // load or generate PQC Dilithium2 key
    pqcPath := filepath.Join(keyDir, "pqc-key.bin")
    if data, err := ioutil.ReadFile(pqcPath); err == nil {
-       var priv dilithium2.PrivateKey
+       priv := new(eddilithium2.PrivateKey)
        if err := priv.UnmarshalBinary(data); err != nil {
            log.Fatalf("failed to parse PQC key: %v", err)
        }
        pqPriv = priv
-       pqPub = priv.Public().(dilithium2.PublicKey)
+       pqPub = priv.Public().(*eddilithium2.PublicKey)
    } else {
-       pub, priv, err := dilithium2.GenerateKey(rand.Reader)
+       pub, priv, err := eddilithium2.GenerateKey(rand.Reader)
        if err != nil {
            log.Fatalf("failed to generate PQC key: %v", err)
        }
@@ -493,7 +489,13 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
        return
    }
    sigECDSA := base64.RawURLEncoding.EncodeToString(sigBytes)
-   sigPQC := base64.RawURLEncoding.EncodeToString(pqPriv.Sign(rand.Reader, hashBytes))
+   // hybrid PQC signing using Ed25519-Dilithium2
+   pqcSigBytes, err := pqPriv.Sign(rand.Reader, hashBytes, crypto.Hash(0))
+   if err != nil {
+       http.Error(w, "PQC signing error", http.StatusInternalServerError)
+       return
+   }
+   sigPQC := base64.RawURLEncoding.EncodeToString(pqcSigBytes)
    hybridSig := fmt.Sprintf("ecdsa:%s;pqc:%s", sigECDSA, sigPQC)
    entryID := newEntryID()
    accountID := r.Context().Value(ctxKeyAccountID).(string)

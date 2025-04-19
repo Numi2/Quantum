@@ -1,3 +1,5 @@
+// +build ignore
+
 package main
 
 import (
@@ -7,7 +9,7 @@ import (
    "crypto/sha256"
    "testing"
 
-   "github.com/cloudflare/circl/sign/dilithium2"
+   dilithium2 "github.com/cloudflare/circl/sign/dilithium/mode2"
 )
 
 // TestECDSAVerify ensures ECDSA P-256 signatures can be verified

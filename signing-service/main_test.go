@@ -15,7 +15,7 @@ import (
    "testing"
 
    _ "github.com/mattn/go-sqlite3"
-   "github.com/cloudflare/circl/sign/dilithium2"
+   eddilithium2 "github.com/cloudflare/circl/sign/eddilithium2"
 )
 
 // init sets up an in-memory DB and keys
@@ -40,7 +40,7 @@ func init() {
    if err != nil {
        panic(fmt.Sprintf("failed to generate ECDSA key: %v", err))
    }
-   _, pqPrivLocal, err := dilithium2.GenerateKey(rand.Reader)
+   _, pqPrivLocal, err := eddilithium2.GenerateKey(rand.Reader)
    if err != nil {
        panic(fmt.Sprintf("failed to generate PQC key: %v", err))
    }
