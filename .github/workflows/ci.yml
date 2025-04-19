@@ -1,19 +1,28 @@
 name: CI
+
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.20'
+
       - name: Cache Go modules
         uses: actions/cache@v3
         with:
@@ -21,20 +30,24 @@ jobs:
             ~/.cache/go-build
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+
       - name: Install dependencies
         run: go mod tidy
+
       - name: Format Go code
         run: |
           for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
             echo "Formatting $d"
             (cd "$d" && go fmt ./...)
           done
+
       - name: Vet Go code
         run: |
           for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
             echo "Vetting $d"
             (cd "$d" && go vet ./...)
           done
+
       - name: Build services
         run: |
           go build ./ca-service
@@ -43,21 +56,26 @@ jobs:
           go build ./signing-service
           go build ./cli
           go build ./transparency-log-service
+
       - name: Run tests
         run: go test ./...
+
       - name: Anchore SBOM Action
         uses: anchore/sbom-action@v0.18.0
-      - name: Generate SLSA provenance
-        uses: sigstore/slsa-provenance-action@v1
+
+      - name: Attest SLSA provenance
+        uses: actions/attest-build-provenance@v2
         with:
-          artifact-path: sbom.json
+          subject-path: sbom.json
+
       - name: Upload SBOM
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: sbom
           path: sbom.json
+
       - name: Upload provenance
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: provenance
           path: slsa-provenance.json

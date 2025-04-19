@@ -1,3 +1,7 @@
 # Ignore all .txt files except the readme.txt
+ROI.txt
+monetization.txt
+Human.txt
+HUMAN_GUIDE.txt
 *.txt
 !readme.txt
