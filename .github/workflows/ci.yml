@@ -72,6 +72,8 @@ jobs:
 
       - name: Anchore SBOM Action
         uses: anchore/sbom-action@v0.18.0
+        with:
+          output-file: sbom.json
 
       - name: Attest SLSA provenance
         uses: actions/attest-build-provenance@v2
