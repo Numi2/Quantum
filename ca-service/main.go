@@ -216,12 +216,14 @@ func main() {
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    pool,
-			MinVersion:   tls.VersionTLS12,
-			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+        TLSConfig: &tls.Config{
+            Certificates: []tls.Certificate{tlsCert},
+            ClientAuth:   tls.RequireAndVerifyClientCert,
+            ClientCAs:    pool,
+            MinVersion:   tls.VersionTLS12,
+            // Prefer PQ hybrid X25519-KEM then classical X25519
+            CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519},
+            VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 				if len(verifiedChains) == 0 || len(verifiedChains[0]) == 0 {
 					return fmt.Errorf("no client certificate")
 				}

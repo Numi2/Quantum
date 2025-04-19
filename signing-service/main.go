@@ -519,7 +519,14 @@ func main() {
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12, ClientAuth: tls.RequireAndVerifyClientCert, VerifyPeerCertificate: verifyClientCertificate},
+                TLSConfig: &tls.Config{
+                    Certificates:          []tls.Certificate{tlsCert},
+                    MinVersion:            tls.VersionTLS12,
+                    ClientAuth:            tls.RequireAndVerifyClientCert,
+                    // Prefer PQ hybrid X25519-KEM then classical X25519
+                    CurvePreferences:      []tls.CurveID{tls.X25519MLKEM768, tls.X25519},
+                    VerifyPeerCertificate: verifyClientCertificate,
+                },
 	}
 	go func() {
 		sugar.Infof("Signing service listening on %s (HTTPS)", addr)
