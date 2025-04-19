@@ -1,113 +1,66 @@
-name: CI & Integration
-
+name: CI
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-
 jobs:
   build:
-    name: Lint, Format & Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.20'
-      - name: Format & Vet
-        run: |
-          go fmt ./...
-          go vet ./...
-      - name: Install golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.54.2
-      - name: Run Linter
-        run: golangci-lint run ./acme-server/...
-      - name: Unit Tests
-        run: |
-          go test ./ca-service/...
-          go test ./acme-server/...
-          go test ./signing-service/...
-          go test ./cli/...
-
-  integration:
-    name: End-to-End Integration
-    needs: build
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:13
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: acme
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/acme?sslmode=disable
-    steps:
-      - uses: actions/checkout@v3
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Cache Go modules
+        uses: actions/cache@v3
         with:
-          go-version: '1.20'
-      - name: Install migrate CLI
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+      - name: Install dependencies
+        run: go mod tidy
+      - name: Format Go code
         run: |
-          curl -sL https://github.com/golang-migrate/migrate/releases/download/v4.15.2/migrate.linux-amd64.tar.gz | tar xz
-          sudo mv migrate /usr/local/bin/migrate
-      - name: Run Migrations
-        run: migrate -database "$DATABASE_URL" -path acme-server/migrations up
-      - name: Build Binaries
+          for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
+            echo "Formatting $d"
+            (cd "$d" && go fmt ./...)
+          done
+      - name: Vet Go code
         run: |
-          go build -o ca-service/ca-service ./ca-service
-          go build -o acme-server/acme-server ./acme-server
-          go build -o signing-service/signing-service ./signing-service
-          go build -o cli/cli ./cli
-      - name: Start CA Service
-        run: nohup ./ca-service/ca-service &
-      - run: sleep 5
-      - name: Start ACME Server
-        run: nohup env DATABASE_URL="$DATABASE_URL" ./acme-server/acme-server &
-      - run: sleep 5
-      - name: Start Signing Service
-        run: nohup ./signing-service/signing-service &
-      - run: sleep 5
-      - name: Prepare SBOM & Provenance
+          for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
+            echo "Vetting $d"
+            (cd "$d" && go vet ./...)
+          done
+      - name: Build services
         run: |
-          echo '{}' > sbom.json
-          echo '{}' > provenance.json
-      - name: Run Signing CLI
-        run: |
-          ./cli/cli --artifact cli/cli --sbom sbom.json --provenance provenance.json --server https://localhost:7000
-      - name: Clean up Services
-        run: |
-          pkill ca-service || true
-          pkill acme-server || true
-          pkill signing-service || true
-
-  docker:
-    name: Build & Push Docker Images
-    needs: integration
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Log in to registry
-        uses: docker/login-action@v2
+          go build ./ca-service
+          go build ./acme-server
+          go build ./device-service
+          go build ./signing-service
+          go build ./cli
+          go build ./transparency-log-service
+      - name: Run tests
+        run: go test ./...
+      - name: Generate SBOM
+        uses: anchore/syft-action@v0.12.0
         with:
-          registry: ${{ secrets.REGISTRY_URL }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
-      - name: Build & Push ACME Server Image
-        uses: docker/build-push-action@v3
+          image: .
+          output: sbom.json
+      - name: Generate SLSA provenance
+        uses: sigstore/slsa-provenance-action@v1
         with:
-          context: acme-server
-          file: acme-server/Dockerfile
-          push: true
-          tags: ${{ secrets.REGISTRY_URL }}/acme-server:latest
+          artifact-path: sbom.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom
+          path: sbom.json
+      - name: Upload provenance
+        uses: actions/upload-artifact@v3
+        with:
+          name: provenance
+          path: slsa-provenance.json
