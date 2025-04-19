@@ -51,10 +51,10 @@ func init() {
 func TestAccountAndSignFlow(t *testing.T) {
 	// setup HTTP handlers
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/accounts", accountsHandler)
-	mux.HandleFunc("/v1/accounts/", accountInfoHandler)
-	mux.HandleFunc("/v1/signatures", signHandler)
-	mux.HandleFunc("/v1/log/", logHandler)
+	mux.Handle("/v1/accounts", clientAuth(http.HandlerFunc(accountsHandler)))
+	mux.Handle("/v1/accounts/", clientAuth(http.HandlerFunc(accountInfoHandler)))
+	mux.Handle("/v1/signatures", clientAuth(http.HandlerFunc(signHandler)))
+	mux.Handle("/v1/log/", clientAuth(http.HandlerFunc(logHandler)))
 
 	server := httptest.NewServer(mux)
 	defer server.Close()
