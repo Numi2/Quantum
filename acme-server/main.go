@@ -40,6 +40,43 @@ func getEnv(key, def string) string {
 	return def
 }
 
+// fetchOCSPStaple retrieves an OCSP staple for the given certificate using the issuer certificate.
+func fetchOCSPStaple(cert *x509.Certificate, issuer *x509.Certificate) ([]byte, error) {
+   if len(cert.OCSPServer) == 0 {
+       return nil, fmt.Errorf("no OCSP server specified in certificate")
+   }
+   reqBytes, err := ocsp.CreateRequest(cert, issuer, nil)
+   if err != nil {
+       return nil, fmt.Errorf("create OCSP request: %v", err)
+   }
+   ocspURL := cert.OCSPServer[0]
+   pool := x509.NewCertPool()
+   pool.AddCert(issuer)
+   client := &http.Client{Transport: &http.Transport{
+       TLSClientConfig: &tls.Config{RootCAs: pool},
+   }}
+   resp, err := client.Post(ocspURL, "application/ocsp-request", bytes.NewReader(reqBytes))
+   if err != nil {
+       return nil, fmt.Errorf("OCSP request failed: %v", err)
+   }
+   defer resp.Body.Close()
+   if resp.StatusCode != http.StatusOK {
+       return nil, fmt.Errorf("OCSP response status: %s", resp.Status)
+   }
+   respBytes, err := io.ReadAll(resp.Body)
+   if err != nil {
+       return nil, fmt.Errorf("read OCSP response: %v", err)
+   }
+   parsed, err := ocsp.ParseResponse(respBytes, issuer)
+   if err != nil {
+       return nil, fmt.Errorf("parse OCSP response: %v", err)
+   }
+   if parsed.Status != ocsp.Good {
+       return nil, fmt.Errorf("OCSP status is not good: %v", parsed.Status)
+   }
+   return respBytes, nil
+}
+
 // CA certificate file used to verify CA service
 var (
 	caCertFile = getEnv("CA_CERT_FILE", "ca-cert.pem")
@@ -280,6 +317,21 @@ func main() {
 	}
 	// build TLS key pair for server and client
 	tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: privKey}
+   // load and parse CA certificate for OCSP stapling
+   caCertPEM, err := os.ReadFile(caCertFile)
+   if err != nil {
+       log.Fatalf("read CA cert: %v", err)
+   }
+   block, _ := pem.Decode(caCertPEM)
+   if block == nil || block.Type != "CERTIFICATE" {
+       log.Fatalf("invalid CA certificate PEM")
+   }
+   caCert, err := x509.ParseCertificate(block.Bytes)
+   if err != nil {
+       log.Fatalf("parse CA certificate: %v", err)
+   }
+
+	// initial OCSP stapling for server certificate
 	// initial OCSP stapling for server certificate
 	if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
 		log.Printf("warning: failed to fetch initial OCSP staple: %v", err)
