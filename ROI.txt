@@ -1,0 +1,10 @@
+High-ROI Next Steps
+
+Prioritized Broadly:
+
+* Observability & Logging (Roadmap Step 6)
+* CI/CD & Compliance Automation (Roadmap Step 7)
+* Database-backed ACME State (Roadmap Step 8)
+* Device-Service Enhancements (persistence, PQC hybrid certs, mTLS)
+* CLI Feature Expansion (SBOM/provenance flags, billing UX)
+* End-to-End Integration Testing

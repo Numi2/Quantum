@@ -32,3 +32,8 @@
    - Signing service now supports SBOM bundling and SLSA provenance via `/v1/signatures` payload and retrieval endpoints.
    - CLI updated to include `--sbom` and `--provenance` flags; SBOM & provenance are exposed via URLs in the response.
    - Provide sample GitHub Actions and Webhook integration for fully automated, zero‑touch signing pipelines.
+
+7. Next: Step 8 - Database‑Backed ACME State
+   - Swap out the in‑memory JSON store for a real SQL backend (PostgreSQL/CockroachDB).
+   - Define migrations (accounts, orders, challenges tables), and wire handlers to read/write transactional state.
+   - Benefits: horizontal scale, crash‑safe, multi‑Pod operation.

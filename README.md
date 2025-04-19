@@ -1,7 +1,7 @@
-# Quantum-Safe PKI as a Service - Scaffold
+# Quantum-Safe PKI as a Service 
 +
 ## Overview
-This repository contains initial scaffolding for a PQC-backed ACME server and a CA service in Go.
+This repository contains a PQC-backed ACME server and a CA service in Go.
 +
 ### Services
 - `acme-server`: Implements ACME v2 directory, account, order, challenge, finalize, and cert endpoints with HTTP-01 challenge support.
@@ -9,6 +9,7 @@ This repository contains initial scaffolding for a PQC-backed ACME server and a 
 +
 ## Prerequisites
 - Go 1.20+
+- PostgreSQL or CockroachDB (for ACME server state)
 - Docker (optional)
 +
 ## Running Services
@@ -22,6 +23,10 @@ go run main.go
 2. Start the ACME server (default port 4000):
 ```bash
 cd acme-server
+# Set up database environment (e.g., PostgreSQL)
+export DATABASE_URL=postgres://user:password@localhost:5432/acme?sslmode=disable
+# Run database migrations
+psql "$DATABASE_URL" -f migrations/0001_create_acme_tables.up.sql
 go run main.go
 ```
 +
