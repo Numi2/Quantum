@@ -527,8 +527,8 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 
 // newOrderHandler creates a new order (expects JWS)
 func newOrderHandler(w http.ResponseWriter, r *http.Request) {
-	// verify JWS and extract payload
-	payload, accountURL, _, err := verifyJWS(w, r)
+		// verify JWS and extract payload
+		payload, _, _, err := verifyJWS(w, r)
 	if err != nil {
 		return
 	}
