@@ -32,7 +32,12 @@ jobs:
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
       - name: Install dependencies
-        run: go mod tidy
+        # Run go mod tidy in each module (root has no go.mod)
+        run: |
+          for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
+            echo "Installing dependencies in $d"
+            (cd "$d" && go mod tidy)
+          done
 
       - name: Format Go code
         run: |
