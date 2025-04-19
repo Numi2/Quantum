@@ -45,11 +45,8 @@ jobs:
           go build ./transparency-log-service
       - name: Run tests
         run: go test ./...
-      - name: Generate SBOM
-        uses: anchore/syft-action@v0.12.0
-        with:
-          image: .
-          output: sbom.json
+      - name: Anchore SBOM Action
+        uses: anchore/sbom-action@v0.18.0
       - name: Generate SLSA provenance
         uses: sigstore/slsa-provenance-action@v1
         with:
