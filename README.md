@@ -1,4 +1,4 @@
-# Quantum-Safe PKI as a Service
+# Quantum-Safe Public Key Infrastructure (PKI)
 
 A set of Go-based services that implement a post-quantum cryptography (PQC) aware Public Key Infrastructure (PKI) and ACME (Automated Certificate Management Environment) server. This project demonstrates how to build a secure, extensible PKI using modern cryptographic techniques.
 
@@ -8,6 +8,7 @@ This repository is structured as a monorepo of related services:
 
 - **acme-server**: ACME v2 compliant server providing directory, nonce, account, order, challenge (HTTP-01), finalize, and certificate issuance endpoints. **This server now supports client authentication using JWS signatures based on the EdDilithium2 PQC algorithm (via CIRCL)** in addition to traditional ECDSA and RSA.
 - **ca-service**: Certificate Authority service that signs Certificate Signing Requests (CSRs). It uses an ECDSA P-256 keypair for its own root certificate and TLS identity, but **uses an EdDilithium2 keypair (from the CIRCL library) to sign certificates issued via the `/sign` endpoint**. This demonstrates a hybrid approach where the CA's identity remains classical while issued artifacts use PQC signatures.
+
 - **cli**: Command-line client for interacting with the ACME server, including account creation, order placement, and certificate retrieval.
 - **device-service**: IoT device certificate issuance service.
 - **signing-service**: Generic signing service for signing arbitrary payloads.

@@ -383,16 +383,49 @@ var dir = Directory{
 }
 
 func main() {
-	// initialize database connection
-	dbURL := getEnv("DATABASE_URL", "postgres://localhost/acme?sslmode=disable")
-	var err error
-	db, err = sql.Open("postgres", dbURL)
-	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		log.Fatalf("failed to ping database: %v", err)
-	}
+   // configuration flags for testing and client authentication
+   skipDB := getEnv("SKIP_DB", "false") == "true"
+   skipCA := getEnv("SKIP_CA", "false") == "true"
+   tlsClientAuth := getEnv("TLS_CLIENT_AUTH", "require_and_verify")
+
+   // initialize database connection (skip if SKIP_DB=true)
+   if skipDB {
+       log.Print("INFO: SKIP_DB enabled, skipping database initialization")
+   } else {
+       dbURL := getEnv("DATABASE_URL", "postgres://localhost/acme?sslmode=disable")
+       var err error
+       db, err = sql.Open("postgres", dbURL)
+       if err != nil {
+           log.Fatalf("failed to open database: %v", err)
+       }
+       if err := db.Ping(); err != nil {
+           log.Fatalf("failed to ping database: %v", err)
+       }
+   }
+   // determine server's client authentication mode
+   var clientAuthType tls.ClientAuthType
+   switch tlsClientAuth {
+   case "none":
+       clientAuthType = tls.NoClientCert
+   case "request":
+       clientAuthType = tls.RequestClientCert
+   case "require":
+       clientAuthType = tls.RequireAnyClientCert
+   case "verify_if_given":
+       clientAuthType = tls.VerifyClientCertIfGiven
+   case "require_and_verify":
+       clientAuthType = tls.RequireAndVerifyClientCert
+   default:
+       log.Printf("WARN: invalid TLS_CLIENT_AUTH %s, defaulting to require_and_verify", tlsClientAuth)
+       clientAuthType = tls.RequireAndVerifyClientCert
+   }
+   // assign verify function only if client authentication is enabled
+   var verifyFunc func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
+   if clientAuthType == tls.NoClientCert {
+       verifyFunc = nil
+   } else {
+       verifyFunc = verifyClientCertificate
+   }
 
 	// initialize keystore for TLS identity
 	keyDir := getEnv("KEY_DIR", "keys")
@@ -421,85 +454,120 @@ func main() {
 			log.Fatalf("ACME key is not ECDSA")
 		}
 	}
-	// load or request ACME server certificate from CA
-	certObj, err := ks.GetCertificate("acme-tls")
-	if err == ErrKeyNotFound {
-		// create CSR
-		csrTmpl := x509.CertificateRequest{Subject: pkix.Name{CommonName: "acme-server"}}
-		csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, privKey)
-		if err != nil {
-			log.Fatalf("create CSR: %v", err)
-		}
-		buf := &bytes.Buffer{}
-		pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-		// request from CA service
-		caCertPEM, err := os.ReadFile(caCertFile)
-		if err != nil {
-			log.Fatalf("read CA cert: %v", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caCertPEM) {
-			log.Fatalf("failed to load CA root")
-		}
-		httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-		resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
-		if err != nil {
-			log.Fatalf("CSR sign request failed: %v", err)
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatalf("read CA response: %v", err)
-		}
-		// parse leaf certificate
-		block, _ := pem.Decode(body)
-		if block == nil || block.Type != "CERTIFICATE" {
-			log.Fatalf("invalid certificate PEM")
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			log.Fatalf("parse certificate: %v", err)
-		}
-		if err := ks.ImportCertificate("acme-tls", cert); err != nil {
-			log.Fatalf("store ACME cert: %v", err)
-		}
-		certObj = cert
-	} else if err != nil {
-		log.Fatalf("load ACME cert: %v", err)
-	}
-	// build TLS key pair for server and client
-	tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: privKey}
-	// load and parse CA certificate for OCSP stapling
-	caCertPEM, err := os.ReadFile(caCertFile)
-	if err != nil {
-		log.Fatalf("read CA cert: %v", err)
-	}
-	block, _ := pem.Decode(caCertPEM)
-	if block == nil || block.Type != "CERTIFICATE" {
-		log.Fatalf("invalid CA certificate PEM")
-	}
-	caCert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		log.Fatalf("parse CA certificate: %v", err)
-	}
+   // load or request ACME server certificate (self-signed if SKIP_CA=true)
+   certObj, err := ks.GetCertificate("acme-tls")
+   if err == ErrKeyNotFound {
+       if skipCA {
+           // generate self-signed certificate for testing
+           serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+           if err != nil {
+               log.Fatalf("generate serial for self-signed cert: %v", err)
+           }
+           tmpl := &x509.Certificate{
+               SerialNumber: serial,
+               Subject:      pkix.Name{CommonName: "localhost"},
+               NotBefore:    time.Now().Add(-1 * time.Minute),
+               NotAfter:     time.Now().Add(24 * time.Hour),
+               KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+               ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+               DNSNames:     []string{"localhost"},
+           }
+           derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
+           if err != nil {
+               log.Fatalf("generate self-signed certificate: %v", err)
+           }
+           cert, err := x509.ParseCertificate(derBytes)
+           if err != nil {
+               log.Fatalf("parse self-signed certificate: %v", err)
+           }
+           if err := ks.ImportCertificate("acme-tls", cert); err != nil {
+               log.Fatalf("store self-signed certificate: %v", err)
+           }
+           certObj = cert
+       } else {
+           // create CSR
+           csrTmpl := x509.CertificateRequest{Subject: pkix.Name{CommonName: "acme-server"}}
+           csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, privKey)
+           if err != nil {
+               log.Fatalf("create CSR: %v", err)
+           }
+           buf := &bytes.Buffer{}
+           pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+           // request from CA service
+           caCertPEM, err := os.ReadFile(caCertFile)
+           if err != nil {
+               log.Fatalf("read CA cert: %v", err)
+           }
+           pool := x509.NewCertPool()
+           if !pool.AppendCertsFromPEM(caCertPEM) {
+               log.Fatalf("failed to load CA root")
+           }
+           httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+           resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
+           if err != nil {
+               log.Fatalf("CSR sign request failed: %v", err)
+           }
+           defer resp.Body.Close()
+           body, err := io.ReadAll(resp.Body)
+           if err != nil {
+               log.Fatalf("read CA response: %v", err)
+           }
+           // parse leaf certificate
+           block, _ := pem.Decode(body)
+           if block == nil || block.Type != "CERTIFICATE" {
+               log.Fatalf("invalid certificate PEM")
+           }
+           cert, err := x509.ParseCertificate(block.Bytes)
+           if err != nil {
+               log.Fatalf("parse certificate: %v", err)
+           }
+           if err := ks.ImportCertificate("acme-tls", cert); err != nil {
+               log.Fatalf("store ACME cert: %v", err)
+           }
+           certObj = cert
+       }
+   } else if err != nil {
+       log.Fatalf("load ACME cert: %v", err)
+   }
+   // build TLS key pair for server and client
+   tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: privKey}
+   // prepare CA certificate variable for OCSP refresh
+   var caCert *x509.Certificate
+   // OCSP stapling and CA service client setup (skip if SKIP_CA=true)
+   if !skipCA {
+       // load and parse CA certificate for OCSP stapling
+       caCertPEM, err := os.ReadFile(caCertFile)
+       if err != nil {
+           log.Fatalf("read CA cert: %v", err)
+       }
+       block, _ := pem.Decode(caCertPEM)
+       if block == nil || block.Type != "CERTIFICATE" {
+           log.Fatalf("invalid CA certificate PEM")
+       }
+       caCert, err = x509.ParseCertificate(block.Bytes)
+       if err != nil {
+           log.Fatalf("parse CA certificate: %v", err)
+       }
 
-	// initial OCSP stapling for server certificate
-	// initial OCSP stapling for server certificate
-	if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
-		log.Printf("warning: failed to fetch initial OCSP staple: %v", err)
-	} else {
-		tlsCert.OCSPStaple = staple
-	}
-	// setup HTTPS client to talk to CA service with mTLS
-	caCertPEM, err = os.ReadFile(caCertFile)
-	if err != nil {
-		log.Fatalf("read CA cert: %v", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caCertPEM) {
-		log.Fatalf("failed to load CA root")
-	}
-	httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAndVerifyClientCert, VerifyPeerCertificate: verifyClientCertificate}}}
+       // initial OCSP stapling for server certificate
+       if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
+           log.Printf("warning: failed to fetch initial OCSP staple: %v", err)
+       } else {
+           tlsCert.OCSPStaple = staple
+       }
+       // setup HTTPS client to talk to CA service with mTLS
+       caCertPEM, err = os.ReadFile(caCertFile)
+       if err != nil {
+           log.Fatalf("read CA cert: %v", err)
+       }
+       pool := x509.NewCertPool()
+       if !pool.AppendCertsFromPEM(caCertPEM) {
+           log.Fatalf("failed to load CA root")
+       }
+       httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAndVerifyClientCert, VerifyPeerCertificate: verifyClientCertificate}}}
+   } else {
+       httpClient = http.DefaultClient
+   }
 	// register handlers with customizable timeouts
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -527,25 +595,27 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
             TLSConfig: &tls.Config{
-                Certificates:          []tls.Certificate{tlsCert},
-                MinVersion:            tls.VersionTLS12,
-                ClientAuth:            tls.RequireAndVerifyClientCert,
+                Certificates:     []tls.Certificate{tlsCert},
+                MinVersion:       tls.VersionTLS12,
+                ClientAuth:       clientAuthType,
                 // Prefer PQ hybrid X25519-KEM then classical X25519
-                CurvePreferences:      []tls.CurveID{tls.X25519MLKEM768, tls.X25519},
-                VerifyPeerCertificate: verifyClientCertificate,
+                CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519},
+                VerifyPeerCertificate: verifyFunc,
             },
 	}
-	// periodic OCSP staple refresh
-	go func() {
-		for {
-			time.Sleep(12 * time.Hour)
-			if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
-				log.Printf("OCSP staple refresh failed: %v", err)
-			} else {
-				server.TLSConfig.Certificates[0].OCSPStaple = staple
-			}
-		}
-	}()
+   // periodic OCSP staple refresh (skip if SKIP_CA=true)
+   if !skipCA {
+       go func() {
+           for {
+               time.Sleep(12 * time.Hour)
+               if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
+                   log.Printf("OCSP staple refresh failed: %v", err)
+               } else {
+                   server.TLSConfig.Certificates[0].OCSPStaple = staple
+               }
+           }
+       }()
+   }
 	log.Printf("ACME server starting on https%s", addr)
 	log.Fatal(server.ListenAndServeTLS("", ""))
 }
