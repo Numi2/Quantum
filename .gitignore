@@ -1,0 +1,3 @@
+# Ignore all .txt files except the readme.txt
+*.txt
+!readme.txt
