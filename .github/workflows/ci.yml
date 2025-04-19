@@ -73,16 +73,7 @@ jobs:
           ./bin/ca-service --tls-cert tls.crt --tls-key tls.key --addr ":8443" &
           echo $! > ca.pid
 
-      - name: Test hybrid KEM handshake
-        run: |
-          cat > pqkem_test.go << 'EOF'
-          package main
-
-          import (
-            "crypto/tls"
-            "fmt"
-            "os"
-          )
+     
 
           func main() {
             cfg := &tls.Config{
