@@ -16,13 +16,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -118,7 +121,148 @@ var (
 	pqPub      *eddilithium2.PublicKey
 	pqPriv     *eddilithium2.PrivateKey
 	sugar      *zap.SugaredLogger
+
+	// BEGIN ADDED CODE: CRL Cache and verification function
+	crlCache      *pkix.CertificateList
+	crlLastUpdate time.Time
+	crlUpdateLock sync.Mutex // Added import for sync
 )
+
+// fetchCRL fetches and parses the CRL from the CA
+func fetchCRL(caCert *x509.Certificate) (*pkix.CertificateList, error) {
+	// Assuming CA URL from environment or default
+	caCRLURL := getEnv("CA_CRL_URL", "https://localhost:5000/crl")
+	if caCRLURL == "" {
+		return nil, errors.New("CA_CRL_URL is not set")
+	}
+
+	// Use CA certificate pool for CRL fetch client
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		},
+		Timeout: 10 * time.Second, // Add timeout
+	}
+
+	resp, err := client.Get(caCRLURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch CRL from %s: %w", caCRLURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to fetch CRL: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	crlBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CRL response body: %w", err)
+	}
+
+	crl, err := x509.ParseCRL(crlBytes)
+	if err != nil {
+		// Try parsing as PEM-encoded CRL
+		block, _ := pem.Decode(crlBytes)
+		if block != nil && block.Type == "X509 CRL" {
+			crl, err = x509.ParseCRL(block.Bytes)
+			if err == nil {
+				return crl, nil // Successfully parsed PEM CRL
+			}
+		}
+		return nil, fmt.Errorf("failed to parse CRL (DER/PEM): %w", err)
+	}
+
+	return crl, nil
+}
+
+// verifyClientCertificate checks if the client certificate is revoked via CRL
+func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	if len(rawCerts) == 0 {
+		return errors.New("no client certificate presented")
+	}
+
+	// Load CA certificate to verify CRL signature and use for fetching
+	caCertPEM, err := os.ReadFile(getEnv("CA_CERT_FILE", "ca-cert.pem"))
+	if err != nil {
+		sugar.Errorf("Failed to read CA certificate for CRL check: %v", err)
+		return fmt.Errorf("internal server error: could not load CA cert") // Don't expose file path error
+	}
+	block, _ := pem.Decode(caCertPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		sugar.Errorf("Failed to decode CA certificate PEM")
+		return errors.New("internal server error: could not decode CA cert")
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		sugar.Errorf("Failed to parse CA certificate: %v", err)
+		return errors.New("internal server error: could not parse CA cert")
+	}
+
+	// Fetch/Update CRL cache (simple cache, consider more robust mechanism)
+	crlUpdateLock.Lock()
+	if crlCache == nil || time.Since(crlLastUpdate) > 1*time.Hour { // Update hourly
+		sugar.Info("Fetching/Updating CRL...")
+		newCRL, err := fetchCRL(caCert)
+		if err != nil {
+			crlUpdateLock.Unlock()
+			sugar.Errorf("Failed to fetch or parse CRL: %v", err)
+			// Decide: Fail open (allow connection if CRL fetch fails) or fail closed (reject)?
+			// Failing closed here for higher security.
+			return fmt.Errorf("failed to verify revocation status: %w", err)
+		}
+
+		// Verify CRL signature with CA public key
+		err = caCert.CheckCRLSignature(newCRL)
+		if err != nil {
+			crlUpdateLock.Unlock()
+			sugar.Errorf("CRL signature verification failed: %v", err)
+			return errors.New("failed to verify revocation status: CRL signature invalid")
+		}
+
+		crlCache = newCRL
+		crlLastUpdate = time.Now()
+		sugar.Info("CRL updated successfully")
+	}
+	currentCRL := crlCache
+	crlUpdateLock.Unlock()
+
+	// Check each certificate in the presented chain
+	for _, certBytes := range rawCerts {
+		cert, err := x509.ParseCertificate(certBytes)
+		if err != nil {
+			sugar.Warnf("Failed to parse presented client certificate: %v", err)
+			continue // Or return error? Depends on policy.
+		}
+
+		// Check against revoked certificates in the CRL
+		for _, revokedCert := range currentCRL.TBSCertList.RevokedCertificates {
+			if cert.SerialNumber.Cmp(revokedCert.SerialNumber) == 0 {
+				sugar.Warnf("Client certificate revoked: S/N %s", cert.SerialNumber.String())
+				return fmt.Errorf("client certificate revoked (S/N: %s)", cert.SerialNumber.String())
+			}
+		}
+	}
+
+	// If we are here, none of the presented certs were found in the CRL.
+	// We still rely on the standard TLS verification (verifiedChains) for trust path.
+	// This callback *supplements* standard verification, it doesn't replace it.
+	// The standard library already performed chain validation if we reached this point
+	// with verifiedChains populated. If verifiedChains is empty, it means standard
+	// validation failed *before* our callback was even called.
+	if len(verifiedChains) == 0 {
+		// This case should ideally not happen if ClientAuth requires verification,
+		// but good to double-check.
+		return errors.New("client certificate validation failed standard checks")
+	}
+
+	sugar.Debugf("Client certificate S/N %s verified (not found in CRL)", verifiedChains[0][0].SerialNumber.String())
+	return nil // Certificate is not revoked according to the current CRL
+}
+
+// END ADDED CODE
 
 // getEnv returns the environment variable or default value
 func getEnv(key, def string) string {
@@ -375,7 +519,7 @@ func main() {
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12},
+		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12, ClientAuth: tls.RequireAndVerifyClientCert, VerifyPeerCertificate: verifyClientCertificate},
 	}
 	go func() {
 		sugar.Infof("Signing service listening on %s (HTTPS)", addr)
@@ -547,8 +691,10 @@ func signHandler(w http.ResponseWriter, r *http.Request) {
 		host = serviceHost
 	}
 	resp := SignResponse{
-		Signature:   hybridSig,
-		LogEntryURL: fmt.Sprintf("https://%s/v1/log/%s", host, entryID),
+		Signature:     hybridSig,
+		LogEntryURL:   fmt.Sprintf("https://%s/v1/log/%s", host, entryID),
+		SBOMURL:       fmt.Sprintf("https://%s/v1/log/%s/sbom", host, entryID),
+		ProvenanceURL: fmt.Sprintf("https://%s/v1/log/%s/provenance", host, entryID),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

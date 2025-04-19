@@ -90,7 +90,148 @@ var (
 var (
 	validNonces = make(map[string]bool)
 	noncesMutex sync.Mutex
+
+	// BEGIN ADDED CODE: CRL Cache
+	crlCache      *pkix.CertificateList
+	crlLastUpdate time.Time
+	crlUpdateLock sync.Mutex
+	// END ADDED CODE
 )
+
+// BEGIN ADDED CODE: CRL Fetch and Verification
+
+// fetchCRL fetches and parses the CRL from the CA
+func fetchCRL(caCert *x509.Certificate) (*pkix.CertificateList, error) {
+	// Assuming CA URL from environment or default
+	caCRLURL := getEnv("CA_CRL_URL", "https://localhost:5000/crl")
+	if caCRLURL == "" {
+		return nil, errors.New("CA_CRL_URL is not set")
+	}
+
+	// Use CA certificate pool for CRL fetch client
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool},
+		},
+		Timeout: 10 * time.Second, // Add timeout
+	}
+
+	resp, err := client.Get(caCRLURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch CRL from %s: %w", caCRLURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to fetch CRL: status %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	crlBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CRL response body: %w", err)
+	}
+
+	crl, err := x509.ParseCRL(crlBytes)
+	if err != nil {
+		// Try parsing as PEM-encoded CRL
+		block, _ := pem.Decode(crlBytes)
+		if block != nil && block.Type == "X509 CRL" {
+			crl, err = x509.ParseCRL(block.Bytes)
+			if err == nil {
+				return crl, nil // Successfully parsed PEM CRL
+			}
+		}
+		return nil, fmt.Errorf("failed to parse CRL (DER/PEM): %w", err)
+	}
+
+	return crl, nil
+}
+
+// verifyClientCertificate checks if the client certificate is revoked via CRL
+func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	if len(rawCerts) == 0 {
+		return errors.New("no client certificate presented")
+	}
+
+	// Load CA certificate to verify CRL signature and use for fetching
+	// Use the globally defined caCertFile
+	caCertPEM, err := os.ReadFile(caCertFile)
+	if err != nil {
+		log.Printf("ERROR: Failed to read CA certificate for CRL check: %v", err)
+		return fmt.Errorf("internal server error: could not load CA cert") // Don't expose file path error
+	}
+	block, _ := pem.Decode(caCertPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		log.Printf("ERROR: Failed to decode CA certificate PEM")
+		return errors.New("internal server error: could not decode CA cert")
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		log.Printf("ERROR: Failed to parse CA certificate: %v", err)
+		return errors.New("internal server error: could not parse CA cert")
+	}
+
+	// Fetch/Update CRL cache (simple cache, consider more robust mechanism)
+	crlUpdateLock.Lock()
+	if crlCache == nil || time.Since(crlLastUpdate) > 1*time.Hour { // Update hourly
+		log.Print("INFO: Fetching/Updating CRL...")
+		newCRL, err := fetchCRL(caCert)
+		if err != nil {
+			crlUpdateLock.Unlock()
+			log.Printf("ERROR: Failed to fetch or parse CRL: %v", err)
+			// Decide: Fail open (allow connection if CRL fetch fails) or fail closed (reject)?
+			// Failing closed here for higher security.
+			return fmt.Errorf("failed to verify revocation status: %w", err)
+		}
+
+		// Verify CRL signature with CA public key
+		err = caCert.CheckCRLSignature(newCRL)
+		if err != nil {
+			crlUpdateLock.Unlock()
+			log.Printf("ERROR: CRL signature verification failed: %v", err)
+			return errors.New("failed to verify revocation status: CRL signature invalid")
+		}
+
+		crlCache = newCRL
+		crlLastUpdate = time.Now()
+		log.Print("INFO: CRL updated successfully")
+	}
+	currentCRL := crlCache
+	crlUpdateLock.Unlock()
+
+	// Check each certificate in the presented chain
+	for _, certBytes := range rawCerts {
+		cert, err := x509.ParseCertificate(certBytes)
+		if err != nil {
+			log.Printf("WARN: Failed to parse presented client certificate: %v", err)
+			continue // Or return error? Depends on policy.
+		}
+
+		// Check against revoked certificates in the CRL
+		for _, revokedCert := range currentCRL.TBSCertList.RevokedCertificates {
+			if cert.SerialNumber.Cmp(revokedCert.SerialNumber) == 0 {
+				log.Printf("WARN: Client certificate revoked: S/N %s", cert.SerialNumber.String())
+				return fmt.Errorf("client certificate revoked (S/N: %s)", cert.SerialNumber.String())
+			}
+		}
+	}
+
+	// If we are here, none of the presented certs were found in the CRL.
+	// We still rely on the standard TLS verification (verifiedChains) for trust path.
+	if len(verifiedChains) == 0 {
+		// This case should ideally not happen if ClientAuth requires verification,
+		// but good to double-check.
+		return errors.New("client certificate validation failed standard checks")
+	}
+
+	log.Printf("DEBUG: Client certificate S/N %s verified (not found in CRL)", verifiedChains[0][0].SerialNumber.String())
+	return nil // Certificate is not revoked according to the current CRL
+}
+
+// END ADDED CODE
 
 // verifyJWS verifies the JWS-signed ACME request
 func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountURL string, jwk *jose.JSONWebKey, err error) {
@@ -358,7 +499,7 @@ func main() {
 	if !pool.AppendCertsFromPEM(caCertPEM) {
 		log.Fatalf("failed to load CA root")
 	}
-	httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}}}}
+	httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAndVerifyClientCert, VerifyPeerCertificate: verifyClientCertificate}}}
 	// register handlers with customizable timeouts
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -386,8 +527,10 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
 		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-			MinVersion:   tls.VersionTLS12,
+			Certificates:          []tls.Certificate{tlsCert},
+			MinVersion:            tls.VersionTLS12,
+			ClientAuth:            tls.RequireAndVerifyClientCert,
+			VerifyPeerCertificate: verifyClientCertificate,
 		},
 	}
 	// periodic OCSP staple refresh
