@@ -178,7 +178,7 @@ func main() {
    }
    for _, m := range migrations {
        if _, err := db.Exec(m); err != nil {
-           log.Fatalf("migration failed: %v", err)
+           sugar.Fatalf("migration failed: %v", err)
        }
    }
 
@@ -191,10 +191,10 @@ func main() {
    case "pkcs11":
        ks, err = NewPKCS11KeyStore(keyDir)
    default:
-       log.Fatalf("unknown KEYSTORE_TYPE '%s', must be 'fs' or 'pkcs11'", storeType)
+       sugar.Fatalf("unknown KEYSTORE_TYPE '%s', must be 'fs' or 'pkcs11'", storeType)
    }
    if err != nil {
-       log.Fatalf("failed to initialize keystore: %v", err)
+       sugar.Fatalf("failed to initialize keystore: %v", err)
    }
    // load or generate ECDSA key
    rawKey, err := ks.GetPrivateKey("ecdsa")
@@ -252,12 +252,12 @@ func main() {
    mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
        // readiness: ensure DB is open and keys loaded
        if db == nil {
-           http.Error(w, "db not ready", http.StatusServiceUnavailable)
+           writeError(w, http.StatusServiceUnavailable, "db not ready")
            return
        }
        // optional: ping DB
        if err := db.Ping(); err != nil {
-           http.Error(w, "db ping failed", http.StatusServiceUnavailable)
+           writeError(w, http.StatusServiceUnavailable, "db ping failed")
            return
        }
        w.WriteHeader(http.StatusOK)
@@ -400,7 +400,8 @@ func main() {
 // accountsHandler registers a new free-tier account
 func accountsHandler(w http.ResponseWriter, r *http.Request) {
    if r.Method != http.MethodPost {
-       http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+       w.Header().Set("Allow", http.MethodPost)
+       writeError(w, http.StatusMethodNotAllowed, "method not allowed")
        return
    }
    accountID := newEntryID()
@@ -414,7 +415,7 @@ func accountsHandler(w http.ResponseWriter, r *http.Request) {
        accountID, apiKey, plan, 0, reset,
    )
    if err != nil {
-       http.Error(w, fmt.Sprintf("account creation failed: %v", err), http.StatusInternalServerError)
+       writeError(w, http.StatusInternalServerError, fmt.Sprintf("account creation failed: %v", err))
        return
    }
    w.Header().Set("Content-Type", "application/json")
@@ -470,7 +471,7 @@ func clientAuth(next http.Handler) http.Handler {
        var acc Account
        var usageReset time.Time
        if err := row.Scan(&acc.ID, &acc.Plan, &acc.UsageCount, &usageReset); err != nil {
-           http.Error(w, "unauthorized", http.StatusUnauthorized)
+           writeError(w, http.StatusUnauthorized, "unauthorized")
            return
        }
        now := time.Now().UTC()
@@ -480,7 +481,7 @@ func clientAuth(next http.Handler) http.Handler {
            db.Exec(`UPDATE accounts SET usage_count=?,usage_reset=? WHERE id=?`, 0, usageReset, acc.ID)
        }
        if acc.Plan == "free" && acc.UsageCount >= FreeLimit {
-           http.Error(w, "free tier limit exceeded", http.StatusPaymentRequired)
+           writeError(w, http.StatusPaymentRequired, "free tier limit exceeded")
            return
        }
        acc.UsageCount++
