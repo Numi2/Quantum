@@ -64,7 +64,11 @@ jobs:
           go build -o bin/transparency-log-service ./transparency-log-service
 
       - name: Run tests
-        run: go test ./...
+        run: |
+          for d in acme-server ca-service cli device-service signing-service transparency-log-service; do
+            echo "Running tests in $d"
+            (cd "$d" && go test ./...)
+          done
 
       - name: Anchore SBOM Action
         uses: anchore/sbom-action@v0.18.0
