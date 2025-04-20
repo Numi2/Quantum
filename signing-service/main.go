@@ -603,48 +603,12 @@ func main() {
 
 	// prepare TLS certificate
 	var finalTlsCert tls.Certificate
-	if len(newCertChainBytes) > 0 {
-		// Use the full chain we just received
-		var err error
-		// tls.X509KeyPair requires PEM key, which we don't have for Dilithium2 easily.
-		// Construct tls.Certificate manually.
-		// finalTlsCert, err = tls.X509KeyPair(newCertChainBytes, mustMarshalPrivateKey(tlsPriv))
-
-		// Parse the PEM chain bytes
-		var certsDER [][]byte
-		remainder := newCertChainBytes
-		for len(remainder) > 0 {
-			block, r := pem.Decode(remainder)
-			if block == nil {
-				break
-			}
-			if block.Type == "CERTIFICATE" {
-				certsDER = append(certsDER, block.Bytes)
-			}
-			remainder = r
-		}
-		if len(certsDER) == 0 {
-			sugar.Fatalf("No certificate blocks found in chain from CA")
-		}
-
-		finalTlsCert.Certificate = certsDER
-		finalTlsCert.PrivateKey = tlsPriv // Assign the Dilithium2 key directly
-		// We need the leaf certificate object for OCSP stapling later
-		leafCert, err := x509.ParseCertificate(certsDER[0])
-		if err != nil {
-			sugar.Fatalf("Failed to parse leaf certificate from new CA chain: %v", err)
-		}
-		certObj = leafCert // Update certObj for OCSP
-
-		if err != nil {
-			sugar.Fatalf("Failed to create key pair from new CA chain: %v", err)
-		}
-	} else {
-		// Use the certificate loaded from storage
-		// Construct tls.Certificate manually as well
-		finalTlsCert = tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: tlsPriv}
-		// TODO: If full chain is needed here, load it from storage if KS supports it.
+	// Load server TLS certificate and key from environment-set files
+	tlsCert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+	if err != nil {
+		sugar.Fatalf("failed to load TLS certificate or key: %v", err)
 	}
+	finalTlsCert = tlsCert
 
 	// initial OCSP staple
 	// This logic remains largely the same, but uses the final certObj (leaf)
