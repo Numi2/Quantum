@@ -190,3 +190,22 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) now:
 - Uploads both the SBOM and provenance file as workflow artifacts.
 
 This end‑to‑end pipeline ensures reproducible builds, provable supply chain integrity, and easy auditing.
+
+## Licensing
+
+This project is dual-licensed under:
+
+- GNU Affero General Public License v3.0 (AGPL-3.0-or-later): see LICENSE-AGPL.md
+- Commercial License: see LICENSE-COMMERCIAL.md
+
+### License FAQ
+
+Q: What license applies if I use the software in my own network service?  
+A: Under the AGPL-3.0. If you run this software as a service, you must make your source code
+   available under the AGPL. See LICENSE-AGPL.md.
+
+Q: Can I embed or distribute this software in a proprietary product?  
+A: Yes, by obtaining a commercial license from eMedic AS. Contact mail@siqn.org for terms.
+
+Q: Who do I contact for commercial licensing?  
+A: mail@siqn.org
