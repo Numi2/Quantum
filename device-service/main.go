@@ -81,6 +81,10 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CSR encoding", http.StatusBadRequest)
 		return
 	}
+	// TODO PQC: For the issued certificate to be fully PQC,
+	// the incoming CSR (csrDER) must contain a Dilithium2 public key
+	// and be signed by the corresponding Dilithium2 private key from the device.
+	// This service only forwards the CSR; the PQC key generation must happen on the device.
 	var pemBuf bytes.Buffer
 	pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 

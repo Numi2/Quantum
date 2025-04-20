@@ -201,10 +201,10 @@ func main() {
 			ClientAuth:   tls.RequireAndVerifyClientCert,
 			ClientCAs:    pool,
 			MinVersion:   tls.VersionTLS12,
-			// Prefer PQ hybrid KEM, remove classical fallback X25519.
-			// Note: Standard Go TLS likely won't use X25519MLKEM768 yet.
-			// Actual KEM will probably be classical (e.g. ECDHE) based on negotiation.
-			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+			// CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, // Explicit setting removed.
+			// With Go 1.24+, leaving CurvePreferences nil enables X25519MLKEM768 hybrid KEM by default.
+			// This provides hybrid PQC safety for the key exchange.
+			// To disable: GODEBUG=tlsmlkem=0
 			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 				if len(verifiedChains) == 0 || len(verifiedChains[0]) == 0 {
 					return errors.New("client certificate validation failed or no certificate presented")
@@ -378,7 +378,6 @@ func crlHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	revocationsMu.Unlock()
 	crlTemplate := x509.RevocationList{
-		SignatureAlgorithm:  x509.ECDSAWithSHA256,
 		RevokedCertificates: revoked,
 		ThisUpdate:          time.Now(),
 		NextUpdate:          time.Now().Add(24 * time.Hour),

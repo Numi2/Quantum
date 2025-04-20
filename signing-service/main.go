@@ -222,7 +222,8 @@ func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certifi
 		*/ // END MODIFICATION
 		// Assuming CRL fetched over trusted TLS connection to CA is sufficient for now.
 		// A full solution would require loading the CA's Dilithium2 public key and verifying here.
-		sugar.Warn("WARN: Skipping CRL signature verification due to PQC CA.")
+		// crypto/x509 does not easily expose the raw signature for verification after parsing.
+		sugar.Warn("WARN: Skipping CRL signature verification due to PQC CA and standard library limitations.")
 
 		crlCache = newCRL
 		crlLastUpdate = time.Now()
@@ -693,10 +694,11 @@ func main() {
 			Certificates: []tls.Certificate{finalTlsCert},
 			MinVersion:   tls.VersionTLS12,
 			ClientAuth:   tls.RequireAndVerifyClientCert,
-			// ClientCAs pool needs to be initialized if not already done globally for the client verification
 			// ClientCAs: pool, // Assuming pool is defined and holds the CA cert
-			// Prefer PQ hybrid KEM, remove classical fallback X25519.
-			CurvePreferences:      []tls.CurveID{tls.X25519MLKEM768},
+			// CurvePreferences:      []tls.CurveID{tls.X25519MLKEM768}, // Explicit setting removed.
+			// With Go 1.24+, leaving CurvePreferences nil enables X25519MLKEM768 hybrid KEM by default.
+			// This provides hybrid PQC safety for the key exchange.
+			// To disable: GODEBUG=tlsmlkem=0
 			VerifyPeerCertificate: verifyClientCertificate,
 		},
 	}

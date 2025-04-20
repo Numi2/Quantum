@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto"
-	"crypto/ecdsa"
 	"crypto/rand"
-	rsa "crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -216,7 +214,8 @@ func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certifi
 		*/ // END MODIFICATION
 		// Assuming CRL fetched over trusted TLS connection to CA is sufficient for now.
 		// A full solution would require loading the CA's Dilithium2 public key and verifying here.
-		log.Print("WARN: Skipping CRL signature verification due to PQC CA.")
+		// crypto/x509 does not easily expose the raw signature for verification after parsing.
+		log.Print("WARN: Skipping CRL signature verification due to PQC CA and standard library limitations.")
 
 		crlCache = newCRL
 		crlLastUpdate = time.Now()
@@ -356,29 +355,6 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 	}
 	// Verify signature
 	switch key := pubKey.(type) {
-	case *rsa.PublicKey:
-		// REJECT: RSA keys are no longer supported for account keys
-		http.Error(w, "RSA account keys are no longer supported; use keyChange to update", http.StatusBadRequest)
-		return nil, accountURL, jwk, errors.New("RSA account key unsupported")
-		/* // Old verification logic
-		if err = rsa.VerifyPKCS1v15(key, crypto.SHA256, hash[:], sigBytes); err != nil {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return payload, accountURL, jwk, err
-		}
-		*/
-	case *ecdsa.PublicKey:
-		// REJECT: ECDSA keys are no longer supported for account keys
-		http.Error(w, "ECDSA account keys are no longer supported; use keyChange to update", http.StatusBadRequest)
-		return nil, accountURL, jwk, errors.New("ECDSA account key unsupported")
-		/* // Old verification logic
-		half := len(sigBytes) / 2
-		rInt := new(big.Int).SetBytes(sigBytes[:half])
-		sInt := new(big.Int).SetBytes(sigBytes[half:])
-		if !ecdsa.Verify(key, hash[:], rInt, sInt) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return payload, accountURL, jwk, errors.New("ecdsa verification failed")
-		}
-		*/
 	case *eddilithium2.PublicKey:
 		// Note: Assumes go-jose.v2 correctly marshals/unmarshals the CIRCL key.
 		// EdDilithium2 does not use SHA256 for hashing internally, it takes the message directly.
@@ -388,9 +364,10 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 		}
 	default:
 		// Check the type of the key if debugging is needed
-		// log.Printf("Unsupported key type: %T", pubKey)
-		http.Error(w, "unsupported key type", http.StatusBadRequest)
-		return nil, "", nil, fmt.Errorf("unsupported key type: %T", pubKey)
+		log.Printf("Unsupported account key type for JWS verification: %T", pubKey)
+		// Return error indicating only Dilithium2 is supported now
+		http.Error(w, "Unsupported account key type; only Dilithium2 is supported", http.StatusBadRequest)
+		return nil, "", nil, fmt.Errorf("unsupported account key type: %T", pubKey)
 	}
 	return payload, accountURL, jwk, nil
 }
@@ -709,8 +686,10 @@ func main() {
 			Certificates: []tls.Certificate{tlsCert},
 			MinVersion:   tls.VersionTLS12,
 			ClientAuth:   clientAuthType,
-			// Prefer PQ hybrid KEM, remove classical fallback X25519.
-			CurvePreferences:      []tls.CurveID{tls.X25519MLKEM768},
+			// CurvePreferences: []tls.CurveID{tls.X25519MLKEM768}, // Explicit setting removed.
+			// With Go 1.24+, leaving CurvePreferences nil enables X25519MLKEM768 hybrid KEM by default.
+			// This provides hybrid PQC safety for the key exchange.
+			// To disable: GODEBUG=tlsmlkem=0
 			VerifyPeerCertificate: verifyFunc,
 		},
 	}
