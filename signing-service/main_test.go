@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -36,10 +34,7 @@ func init() {
 		}
 	}
 	// generate keys
-	privateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		panic(fmt.Sprintf("failed to generate ECDSA key: %v", err))
-	}
+	// Generate Dilithium2 key (this populates the global pqPriv used by handlers)
 	_, pqPrivLocal, err := eddilithium2.GenerateKey(rand.Reader)
 	if err != nil {
 		panic(fmt.Sprintf("failed to generate PQC key: %v", err))
@@ -96,7 +91,7 @@ func TestAccountAndSignFlow(t *testing.T) {
 	data := []byte("hello world")
 	hash := sha256.Sum256(data)
 	hashStr := fmt.Sprintf("sha256:%x", hash[:])
-	signReq := map[string]string{"artifactHash": hashStr, "algorithm": "ECDSA+Dilithium2"}
+	signReq := map[string]string{"artifactHash": hashStr, "algorithm": "Dilithium2"}
 	buf := new(bytes.Buffer)
 	json.NewEncoder(buf).Encode(signReq)
 	req3, _ := http.NewRequest("POST", server.URL+"/v1/signatures", buf)
@@ -112,8 +107,8 @@ func TestAccountAndSignFlow(t *testing.T) {
 	if err := json.NewDecoder(resp3.Body).Decode(&signResp); err != nil {
 		t.Fatalf("invalid sign response: %v", err)
 	}
-	if !strings.HasPrefix(signResp.Signature, "ecdsa:") || !strings.Contains(signResp.Signature, "pqc:") {
-		t.Errorf("unexpected signature format: %s", signResp.Signature)
+	if !strings.HasPrefix(signResp.Signature, "pqc:") {
+		t.Errorf("unexpected signature format (expected 'pqc:' prefix): %s", signResp.Signature)
 	}
 
 	// 4. Retrieve log entry

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -37,7 +35,6 @@ const (
 
 var (
 	caCert   *x509.Certificate
-	caKey    *ecdsa.PrivateKey
 	caPqPriv *eddilithium2.PrivateKey
 	caPqPub  *eddilithium2.PublicKey
 )
@@ -105,27 +102,7 @@ func main() {
 			revocations = stored
 		}
 	}
-	// Load or generate CA private key
-	rawKey, err := ks.GetPrivateKey("ca-root")
-	if err == ErrKeyNotFound {
-		priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			log.Fatalf("failed to generate CA key: %v", err)
-		}
-		if err := ks.ImportPrivateKey("ca-root", priv); err != nil {
-			log.Fatalf("failed to store CA key: %v", err)
-		}
-		caKey = priv
-	} else if err != nil {
-		log.Fatalf("error loading CA key: %v", err)
-	} else {
-		priv, ok := rawKey.(*ecdsa.PrivateKey)
-		if !ok {
-			log.Fatalf("CA key is not ECDSA")
-		}
-		caKey = priv
-	}
-	// Load or generate PQC Dilithium2 key for signing issued certs
+	// Load or generate PQC Dilithium2 CA key
 	pqcPath := filepath.Join(keyDir, "ca-pqc-key.bin")
 	if data, err := os.ReadFile(pqcPath); err == nil {
 		priv := new(eddilithium2.PrivateKey)
@@ -156,7 +133,7 @@ func main() {
 	} else {
 		sugar.Fatalf("Failed to read PQC key file %s: %v", pqcPath, err)
 	}
-	// Load or generate CA certificate
+	// Load or generate CA certificate (signed by the Dilithium2 key)
 	cert, err := ks.GetCertificate("ca-cert")
 	if err == ErrKeyNotFound {
 		serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
@@ -172,7 +149,10 @@ func main() {
 			BasicConstraintsValid: true,
 			IsCA:                  true,
 		}
-		der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &caKey.PublicKey, caKey)
+		if caPqPriv == nil || caPqPub == nil {
+			log.Fatalf("Dilithium2 key pair not initialized before certificate generation")
+		}
+		der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, caPqPub, caPqPriv)
 		if err != nil {
 			log.Fatalf("failed to create CA certificate: %v", err)
 		}
@@ -195,7 +175,7 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		// readiness: ensure CA key and certificate are loaded
-		if caKey == nil || caCert == nil {
+		if caPqPriv == nil || caCert == nil {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -208,24 +188,26 @@ func main() {
 	// start HTTPS server with mTLS support
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
-	// build TLS certificate for server using CA cert and key
-	tlsCert := tls.Certificate{Certificate: [][]byte{caCert.Raw}, PrivateKey: caKey}
+	// build TLS certificate for server using CA cert and Dilithium2 key
+	tlsCert := tls.Certificate{Certificate: [][]byte{caCert.Raw}, PrivateKey: caPqPriv}
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
-        TLSConfig: &tls.Config{
-            Certificates: []tls.Certificate{tlsCert},
-            ClientAuth:   tls.RequireAndVerifyClientCert,
-            ClientCAs:    pool,
-            MinVersion:   tls.VersionTLS12,
-            // Prefer PQ hybrid X25519-KEM then classical X25519
-            CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519},
-            VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    pool,
+			MinVersion:   tls.VersionTLS12,
+			// Prefer PQ hybrid KEM, remove classical fallback X25519.
+			// Note: Standard Go TLS likely won't use X25519MLKEM768 yet.
+			// Actual KEM will probably be classical (e.g. ECDHE) based on negotiation.
+			CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+			VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 				if len(verifiedChains) == 0 || len(verifiedChains[0]) == 0 {
-					return fmt.Errorf("no client certificate")
+					return errors.New("client certificate validation failed or no certificate presented")
 				}
 				leaf := verifiedChains[0][0]
 				serialHex := leaf.SerialNumber.Text(16)
@@ -279,7 +261,7 @@ func ocspHandler(w http.ResponseWriter, r *http.Request) {
 		RevokedAt:        revokedTime,
 		RevocationReason: ocsp.Unspecified,
 	}
-	der, err := ocsp.CreateResponse(caCert, caCert, ocspResp, caKey)
+	der, err := ocsp.CreateResponse(caCert, caCert, ocspResp, caPqPriv)
 	if err != nil {
 		http.Error(w, "failed to create OCSP response", http.StatusInternalServerError)
 		return
@@ -401,7 +383,7 @@ func crlHandler(w http.ResponseWriter, r *http.Request) {
 		ThisUpdate:          time.Now(),
 		NextUpdate:          time.Now().Add(24 * time.Hour),
 	}
-	crlBytes, err := x509.CreateRevocationList(rand.Reader, &crlTemplate, caCert, caKey)
+	crlBytes, err := x509.CreateRevocationList(rand.Reader, &crlTemplate, caCert, caPqPriv)
 	if err != nil {
 		http.Error(w, "failed to create CRL", http.StatusInternalServerError)
 		return

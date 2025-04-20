@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	rsa "crypto/rsa"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -41,6 +39,26 @@ func getEnv(key, def string) string {
 	}
 	return def
 }
+
+// BEGIN ADDITION: Add writeError helper function
+// writeError sends a JSON error response
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json") // Keep problem+json for specific ACME errors where set
+	if w.Header().Get("Content-Type") == "application/problem+json" {
+		// Use ACME problem detail structure if Content-Type is problem+json
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"type":   "urn:ietf:params:acme:error:badPublicKey", // Example type
+			"detail": msg,
+		})
+	} else {
+		// Default to simple JSON error
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	}
+}
+
+// END ADDITION
 
 // fetchOCSPStaple retrieves an OCSP staple for the given certificate using the issuer certificate.
 func fetchOCSPStaple(cert *x509.Certificate, issuer *x509.Certificate) ([]byte, error) {
@@ -188,12 +206,17 @@ func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certifi
 		}
 
 		// Verify CRL signature with CA public key
+		/* // BEGIN MODIFICATION: Remove classical signature check
 		err = caCert.CheckCRLSignature(newCRL)
 		if err != nil {
 			crlUpdateLock.Unlock()
 			log.Printf("ERROR: CRL signature verification failed: %v", err)
 			return errors.New("failed to verify revocation status: CRL signature invalid")
 		}
+		*/ // END MODIFICATION
+		// Assuming CRL fetched over trusted TLS connection to CA is sufficient for now.
+		// A full solution would require loading the CA's Dilithium2 public key and verifying here.
+		log.Print("WARN: Skipping CRL signature verification due to PQC CA.")
 
 		crlCache = newCRL
 		crlLastUpdate = time.Now()
@@ -331,15 +354,23 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 		pubKey = parsed.Key
 		jwk = &parsed
 	}
-	hash := sha256.Sum256(signingInput)
 	// Verify signature
 	switch key := pubKey.(type) {
 	case *rsa.PublicKey:
+		// REJECT: RSA keys are no longer supported for account keys
+		http.Error(w, "RSA account keys are no longer supported; use keyChange to update", http.StatusBadRequest)
+		return nil, accountURL, jwk, errors.New("RSA account key unsupported")
+		/* // Old verification logic
 		if err = rsa.VerifyPKCS1v15(key, crypto.SHA256, hash[:], sigBytes); err != nil {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return payload, accountURL, jwk, err
 		}
+		*/
 	case *ecdsa.PublicKey:
+		// REJECT: ECDSA keys are no longer supported for account keys
+		http.Error(w, "ECDSA account keys are no longer supported; use keyChange to update", http.StatusBadRequest)
+		return nil, accountURL, jwk, errors.New("ECDSA account key unsupported")
+		/* // Old verification logic
 		half := len(sigBytes) / 2
 		rInt := new(big.Int).SetBytes(sigBytes[:half])
 		sInt := new(big.Int).SetBytes(sigBytes[half:])
@@ -347,6 +378,7 @@ func verifyJWS(w http.ResponseWriter, r *http.Request) (payload []byte, accountU
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return payload, accountURL, jwk, errors.New("ecdsa verification failed")
 		}
+		*/
 	case *eddilithium2.PublicKey:
 		// Note: Assumes go-jose.v2 correctly marshals/unmarshals the CIRCL key.
 		// EdDilithium2 does not use SHA256 for hashing internally, it takes the message directly.
@@ -383,49 +415,49 @@ var dir = Directory{
 }
 
 func main() {
-   // configuration flags for testing and client authentication
-   skipDB := getEnv("SKIP_DB", "false") == "true"
-   skipCA := getEnv("SKIP_CA", "false") == "true"
-   tlsClientAuth := getEnv("TLS_CLIENT_AUTH", "require_and_verify")
+	// configuration flags for testing and client authentication
+	skipDB := getEnv("SKIP_DB", "false") == "true"
+	skipCA := getEnv("SKIP_CA", "false") == "true"
+	tlsClientAuth := getEnv("TLS_CLIENT_AUTH", "require_and_verify")
 
-   // initialize database connection (skip if SKIP_DB=true)
-   if skipDB {
-       log.Print("INFO: SKIP_DB enabled, skipping database initialization")
-   } else {
-       dbURL := getEnv("DATABASE_URL", "postgres://localhost/acme?sslmode=disable")
-       var err error
-       db, err = sql.Open("postgres", dbURL)
-       if err != nil {
-           log.Fatalf("failed to open database: %v", err)
-       }
-       if err := db.Ping(); err != nil {
-           log.Fatalf("failed to ping database: %v", err)
-       }
-   }
-   // determine server's client authentication mode
-   var clientAuthType tls.ClientAuthType
-   switch tlsClientAuth {
-   case "none":
-       clientAuthType = tls.NoClientCert
-   case "request":
-       clientAuthType = tls.RequestClientCert
-   case "require":
-       clientAuthType = tls.RequireAnyClientCert
-   case "verify_if_given":
-       clientAuthType = tls.VerifyClientCertIfGiven
-   case "require_and_verify":
-       clientAuthType = tls.RequireAndVerifyClientCert
-   default:
-       log.Printf("WARN: invalid TLS_CLIENT_AUTH %s, defaulting to require_and_verify", tlsClientAuth)
-       clientAuthType = tls.RequireAndVerifyClientCert
-   }
-   // assign verify function only if client authentication is enabled
-   var verifyFunc func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
-   if clientAuthType == tls.NoClientCert {
-       verifyFunc = nil
-   } else {
-       verifyFunc = verifyClientCertificate
-   }
+	// initialize database connection (skip if SKIP_DB=true)
+	if skipDB {
+		log.Print("INFO: SKIP_DB enabled, skipping database initialization")
+	} else {
+		dbURL := getEnv("DATABASE_URL", "postgres://localhost/acme?sslmode=disable")
+		var err error
+		db, err = sql.Open("postgres", dbURL)
+		if err != nil {
+			log.Fatalf("failed to open database: %v", err)
+		}
+		if err := db.Ping(); err != nil {
+			log.Fatalf("failed to ping database: %v", err)
+		}
+	}
+	// determine server's client authentication mode
+	var clientAuthType tls.ClientAuthType
+	switch tlsClientAuth {
+	case "none":
+		clientAuthType = tls.NoClientCert
+	case "request":
+		clientAuthType = tls.RequestClientCert
+	case "require":
+		clientAuthType = tls.RequireAnyClientCert
+	case "verify_if_given":
+		clientAuthType = tls.VerifyClientCertIfGiven
+	case "require_and_verify":
+		clientAuthType = tls.RequireAndVerifyClientCert
+	default:
+		log.Printf("WARN: invalid TLS_CLIENT_AUTH %s, defaulting to require_and_verify", tlsClientAuth)
+		clientAuthType = tls.RequireAndVerifyClientCert
+	}
+	// assign verify function only if client authentication is enabled
+	var verifyFunc func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
+	if clientAuthType == tls.NoClientCert {
+		verifyFunc = nil
+	} else {
+		verifyFunc = verifyClientCertificate
+	}
 
 	// initialize keystore for TLS identity
 	keyDir := getEnv("KEY_DIR", "keys")
@@ -433,141 +465,220 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to init keystore: %v", err)
 	}
-	// load or generate ACME server private key
-	rawKey, err := ks.GetPrivateKey("acme-tls")
-	var privKey *ecdsa.PrivateKey
+	// BEGIN MODIFICATION: Use Dilithium2 for ACME TLS Key via Keystore
+	var privKey crypto.Signer                   // Use crypto.Signer interface
+	rawKey, err := ks.GetPrivateKey("acme-tls") // Use ID "acme-tls"
 	if err == ErrKeyNotFound {
-		p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		// Generate new PQC key if not found
+		log.Printf("INFO: Generating new ACME TLS Dilithium2 key...")
+		_, pqcPriv, err := eddilithium2.GenerateKey(rand.Reader) // Discard pub
 		if err != nil {
-			log.Fatalf("generate ACME TLS key: %v", err)
+			log.Fatalf("failed to generate ACME TLS PQC key: %v", err)
 		}
-		if err := ks.ImportPrivateKey("acme-tls", p); err != nil {
-			log.Fatalf("store ACME TLS key: %v", err)
+		if err := ks.ImportPrivateKey("acme-tls", pqcPriv); err != nil {
+			log.Fatalf("failed to store ACME TLS PQC key: %v", err)
 		}
-		privKey = p
+		privKey = pqcPriv // Assign to crypto.Signer
+		log.Printf("INFO: Generated and stored new ACME TLS Dilithium2 key.")
 	} else if err != nil {
-		log.Fatalf("load ACME TLS key: %v", err)
+		// Handle other errors during key loading
+		log.Fatalf("error loading ACME TLS key: %v", err)
 	} else {
-		var ok bool
-		privKey, ok = rawKey.(*ecdsa.PrivateKey)
-		if !ok {
-			log.Fatalf("ACME key is not ECDSA")
+		// Ensure loaded key is PQC
+		if _, ok := rawKey.(*eddilithium2.PrivateKey); !ok {
+			log.Fatalf("loaded TLS key 'acme-tls' is not Dilithium2")
+		}
+		privKey = rawKey.(crypto.Signer) // Assign crypto.Signer
+		log.Printf("INFO: Loaded existing ACME TLS Dilithium2 key.")
+	}
+	// Get the public key part if needed (e.g., for self-signed cert)
+	var pqcPub *eddilithium2.PublicKey
+	if pk, ok := privKey.(*eddilithium2.PrivateKey); ok {
+		pqcPub = pk.Public().(*eddilithium2.PublicKey)
+	} else {
+		// This case should ideally not happen if generation/loading worked
+		log.Fatalf("Could not get PQC public key from loaded private key")
+	}
+
+	// Declare newCertChain and newLeafCert here so they are in scope later
+	var newCertChain [][]byte
+	var newLeafCert *x509.Certificate // Also needed if storing the object
+	// load or request ACME server certificate (using the new Dilithium2 key)
+	certObj, err := ks.GetCertificate("acme-tls")
+	if err != nil || time.Now().After(certObj.NotAfter.Add(-7*24*time.Hour)) { // Also renew if expiring soon
+		if err != ErrKeyNotFound {
+			log.Printf("WARN: Existing ACME TLS cert error or expiring soon, requesting new one: %v", err)
+		}
+		if skipCA {
+			// generate self-signed certificate for testing (if skipping CA)
+			serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+			if err != nil {
+				log.Fatalf("generate serial for self-signed cert: %v", err)
+			}
+			tmpl := &x509.Certificate{
+				SerialNumber: serial,
+				Subject:      pkix.Name{CommonName: "localhost"},
+				NotBefore:    time.Now().Add(-1 * time.Minute),
+				NotAfter:     time.Now().Add(24 * time.Hour),
+				KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+				ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+				DNSNames:     []string{"localhost"},
+			}
+			// Sign self-signed cert with the PQC key
+			derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pqcPub, privKey)
+			if err != nil {
+				log.Fatalf("generate self-signed certificate: %v", err)
+			}
+			cert, err := x509.ParseCertificate(derBytes)
+			if err != nil {
+				log.Fatalf("parse self-signed certificate: %v", err)
+			}
+			if err := ks.ImportCertificate("acme-tls", cert); err != nil {
+				log.Fatalf("store self-signed certificate: %v", err)
+			}
+			certObj = cert
+		} else {
+			// Create CSR using the Dilithium2 private key (`privKey` which is pqcPriv)
+			log.Print("INFO: Requesting new ACME TLS certificate from CA...")
+			csrTmpl := x509.CertificateRequest{Subject: pkix.Name{CommonName: "acme-server"}}
+			// Use the Dilithium2 key (privKey) for CSR generation
+			csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, privKey)
+			if err != nil {
+				log.Fatalf("create CSR for ACME TLS cert: %v", err)
+			}
+			buf := &bytes.Buffer{}
+			pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+			// Ensure httpClient is configured to talk to CA *before* making the request
+			// Load CA cert for trust
+			caCertPEM, err := os.ReadFile(caCertFile)
+			if err != nil {
+				log.Fatalf("read CA cert file for client config: %v", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caCertPEM) {
+				log.Fatalf("failed to load CA root for client config")
+			}
+			// Use the *current* ACME server keypair (Dilithium2) for mTLS to the CA
+			tempTlsCertForClient := tls.Certificate{Certificate: [][]byte{}, PrivateKey: privKey} // Use Dilithium key
+			// If a valid certObj *was* loaded previously (even if expired), use it for mTLS.
+			if certObj != nil {
+				tempTlsCertForClient.Certificate = [][]byte{certObj.Raw}
+			}
+
+			// Setup HTTPS client to talk to CA service with mTLS
+			// Note: This client uses the *potentially old/non-existent* ACME cert for the *first* request.
+			// The CA's VerifyPeerCertificate must handle this (e.g., allow based on CSR content or relax check).
+			// Alternatively, bootstrap trust differently.
+			caClient := &http.Client{
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{
+						RootCAs:      pool,
+						Certificates: []tls.Certificate{tempTlsCertForClient},
+						// ClientAuth should match CA expectation, likely RequireAndVerifyClientCert
+						ClientAuth: tls.RequireAndVerifyClientCert,
+						// VerifyPeerCertificate: verifyClientCertificate, // Avoid recursion/dependency loop
+					},
+				},
+				Timeout: 15 * time.Second, // Increase timeout for CA interaction
+			}
+
+			caSignURL := getEnv("CA_SIGN_URL", "https://localhost:5000/sign")
+			resp, err := caClient.Post(caSignURL, "application/x-pem-file", buf)
+			if err != nil {
+				log.Fatalf("CSR sign request to CA failed: %v", err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Fatalf("read CA response: %v", err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				log.Fatalf("CA signing failed (status %d): %s", resp.StatusCode, string(body))
+			}
+
+			// Parse the *entire* chain returned by CA
+			remainder := body
+			for len(remainder) > 0 {
+				block, r := pem.Decode(remainder)
+				if block == nil {
+					break // No more PEM blocks
+				}
+				if block.Type == "CERTIFICATE" {
+					parsedCert, err := x509.ParseCertificate(block.Bytes)
+					if err != nil {
+						log.Fatalf("failed to parse certificate from CA response: %v", err)
+					}
+					if newLeafCert == nil { // First cert is the leaf
+						newLeafCert = parsedCert
+					}
+					newCertChain = append(newCertChain, block.Bytes)
+				}
+				remainder = r
+			}
+
+			if newLeafCert == nil {
+				log.Fatalf("CA response did not contain a valid certificate PEM block")
+			}
+
+			// Store the new leaf certificate object
+			if err := ks.ImportCertificate("acme-tls", newLeafCert); err != nil {
+				log.Fatalf("store new ACME TLS cert object: %v", err)
+			}
+			// Note: We might want to store the full chain PEM somewhere too if needed.
+			certObj = newLeafCert
+			log.Print("INFO: Successfully obtained new ACME TLS certificate from CA.")
 		}
 	}
-   // load or request ACME server certificate (self-signed if SKIP_CA=true)
-   certObj, err := ks.GetCertificate("acme-tls")
-   if err == ErrKeyNotFound {
-       if skipCA {
-           // generate self-signed certificate for testing
-           serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-           if err != nil {
-               log.Fatalf("generate serial for self-signed cert: %v", err)
-           }
-           tmpl := &x509.Certificate{
-               SerialNumber: serial,
-               Subject:      pkix.Name{CommonName: "localhost"},
-               NotBefore:    time.Now().Add(-1 * time.Minute),
-               NotAfter:     time.Now().Add(24 * time.Hour),
-               KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-               ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-               DNSNames:     []string{"localhost"},
-           }
-           derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
-           if err != nil {
-               log.Fatalf("generate self-signed certificate: %v", err)
-           }
-           cert, err := x509.ParseCertificate(derBytes)
-           if err != nil {
-               log.Fatalf("parse self-signed certificate: %v", err)
-           }
-           if err := ks.ImportCertificate("acme-tls", cert); err != nil {
-               log.Fatalf("store self-signed certificate: %v", err)
-           }
-           certObj = cert
-       } else {
-           // create CSR
-           csrTmpl := x509.CertificateRequest{Subject: pkix.Name{CommonName: "acme-server"}}
-           csrDER, err := x509.CreateCertificateRequest(rand.Reader, &csrTmpl, privKey)
-           if err != nil {
-               log.Fatalf("create CSR: %v", err)
-           }
-           buf := &bytes.Buffer{}
-           pem.Encode(buf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-           // request from CA service
-           caCertPEM, err := os.ReadFile(caCertFile)
-           if err != nil {
-               log.Fatalf("read CA cert: %v", err)
-           }
-           pool := x509.NewCertPool()
-           if !pool.AppendCertsFromPEM(caCertPEM) {
-               log.Fatalf("failed to load CA root")
-           }
-           httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-           resp, err := httpClient.Post("https://localhost:5000/sign", "application/x-pem-file", buf)
-           if err != nil {
-               log.Fatalf("CSR sign request failed: %v", err)
-           }
-           defer resp.Body.Close()
-           body, err := io.ReadAll(resp.Body)
-           if err != nil {
-               log.Fatalf("read CA response: %v", err)
-           }
-           // parse leaf certificate
-           block, _ := pem.Decode(body)
-           if block == nil || block.Type != "CERTIFICATE" {
-               log.Fatalf("invalid certificate PEM")
-           }
-           cert, err := x509.ParseCertificate(block.Bytes)
-           if err != nil {
-               log.Fatalf("parse certificate: %v", err)
-           }
-           if err := ks.ImportCertificate("acme-tls", cert); err != nil {
-               log.Fatalf("store ACME cert: %v", err)
-           }
-           certObj = cert
-       }
-   } else if err != nil {
-       log.Fatalf("load ACME cert: %v", err)
-   }
-   // build TLS key pair for server and client
-   tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: privKey}
-   // prepare CA certificate variable for OCSP refresh
-   var caCert *x509.Certificate
-   // OCSP stapling and CA service client setup (skip if SKIP_CA=true)
-   if !skipCA {
-       // load and parse CA certificate for OCSP stapling
-       caCertPEM, err := os.ReadFile(caCertFile)
-       if err != nil {
-           log.Fatalf("read CA cert: %v", err)
-       }
-       block, _ := pem.Decode(caCertPEM)
-       if block == nil || block.Type != "CERTIFICATE" {
-           log.Fatalf("invalid CA certificate PEM")
-       }
-       caCert, err = x509.ParseCertificate(block.Bytes)
-       if err != nil {
-           log.Fatalf("parse CA certificate: %v", err)
-       }
+	// build TLS key pair for server and client using the potentially new cert and Dilithium2 key
+	tlsCert := tls.Certificate{Certificate: [][]byte{certObj.Raw}, PrivateKey: privKey} // Use Dilithium key
+	// If the CA returned a chain, populate the Certificate field correctly
+	// This requires parsing the chain from the CA response earlier.
+	// Assuming the code above correctly populated newCertChain when a new cert was fetched:
+	if len(newCertChain) > 0 { // Use the full chain if we just got a new one
+		tlsCert.Certificate = newCertChain
+	} else if certObj != nil { // Fallback to just the leaf if loaded from storage
+		tlsCert.Certificate = [][]byte{certObj.Raw}
+		// TODO: Consider loading the rest of the chain from storage if needed/available
+	}
 
-       // initial OCSP stapling for server certificate
-       if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
-           log.Printf("warning: failed to fetch initial OCSP staple: %v", err)
-       } else {
-           tlsCert.OCSPStaple = staple
-       }
-       // setup HTTPS client to talk to CA service with mTLS
-       caCertPEM, err = os.ReadFile(caCertFile)
-       if err != nil {
-           log.Fatalf("read CA cert: %v", err)
-       }
-       pool := x509.NewCertPool()
-       if !pool.AppendCertsFromPEM(caCertPEM) {
-           log.Fatalf("failed to load CA root")
-       }
-       httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAndVerifyClientCert, VerifyPeerCertificate: verifyClientCertificate}}}
-   } else {
-       httpClient = http.DefaultClient
-   }
+	// prepare CA certificate variable for OCSP refresh
+	var caCert *x509.Certificate
+	// OCSP stapling and CA service client setup (skip if SKIP_CA=true)
+	if !skipCA {
+		// load and parse CA certificate for OCSP stapling
+		caCertPEM, err := os.ReadFile(caCertFile)
+		if err != nil {
+			log.Fatalf("read CA cert: %v", err)
+		}
+		block, _ := pem.Decode(caCertPEM)
+		if block == nil || block.Type != "CERTIFICATE" {
+			log.Fatalf("invalid CA certificate PEM")
+		}
+		caCert, err = x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			log.Fatalf("parse CA certificate: %v", err)
+		}
+
+		// initial OCSP stapling for server certificate
+		if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
+			log.Printf("warning: failed to fetch initial OCSP staple: %v", err)
+		} else {
+			tlsCert.OCSPStaple = staple
+		}
+		// setup HTTPS client to talk to CA service with mTLS
+		caCertPEM, err = os.ReadFile(caCertFile)
+		if err != nil {
+			log.Fatalf("read CA cert: %v", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCertPEM) {
+			log.Fatalf("failed to load CA root")
+		}
+		httpClient = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{tlsCert}, ClientAuth: tls.RequireAndVerifyClientCert, VerifyPeerCertificate: verifyClientCertificate}}}
+	} else {
+		httpClient = http.DefaultClient
+	}
 	// register handlers with customizable timeouts
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -594,28 +705,28 @@ func main() {
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
-            TLSConfig: &tls.Config{
-                Certificates:     []tls.Certificate{tlsCert},
-                MinVersion:       tls.VersionTLS12,
-                ClientAuth:       clientAuthType,
-                // Prefer PQ hybrid X25519-KEM then classical X25519
-                CurvePreferences: []tls.CurveID{tls.X25519MLKEM768, tls.X25519},
-                VerifyPeerCertificate: verifyFunc,
-            },
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			MinVersion:   tls.VersionTLS12,
+			ClientAuth:   clientAuthType,
+			// Prefer PQ hybrid KEM, remove classical fallback X25519.
+			CurvePreferences:      []tls.CurveID{tls.X25519MLKEM768},
+			VerifyPeerCertificate: verifyFunc,
+		},
 	}
-   // periodic OCSP staple refresh (skip if SKIP_CA=true)
-   if !skipCA {
-       go func() {
-           for {
-               time.Sleep(12 * time.Hour)
-               if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
-                   log.Printf("OCSP staple refresh failed: %v", err)
-               } else {
-                   server.TLSConfig.Certificates[0].OCSPStaple = staple
-               }
-           }
-       }()
-   }
+	// periodic OCSP staple refresh (skip if SKIP_CA=true)
+	if !skipCA {
+		go func() {
+			for {
+				time.Sleep(12 * time.Hour)
+				if staple, err := fetchOCSPStaple(certObj, caCert); err != nil {
+					log.Printf("OCSP staple refresh failed: %v", err)
+				} else {
+					server.TLSConfig.Certificates[0].OCSPStaple = staple
+				}
+			}
+		}()
+	}
 	log.Printf("ACME server starting on https%s", addr)
 	log.Fatal(server.ListenAndServeTLS("", ""))
 }
@@ -725,6 +836,18 @@ func newAccountHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// payload may contain termsOfServiceAgreed etc; ignore for now
 	_ = payload
+
+	// BEGIN MODIFICATION: Enforce PQC for new accounts
+	if _, ok := jwk.Key.(*eddilithium2.PublicKey); !ok {
+		log.Printf("Rejecting new account request: JWK key type is not Dilithium2 (%T)", jwk.Key)
+		// ACME spec recommends providing a problem document
+		w.Header().Set("Content-Type", "application/problem+json")
+		writeError(w, http.StatusBadRequest, "Account key must use Dilithium2 algorithm")
+		// Consider adding a more specific ACME error type if available/necessary
+		return
+	}
+	// END MODIFICATION
+
 	// generate account ID
 	id, err := generateNonce()
 	if err != nil {

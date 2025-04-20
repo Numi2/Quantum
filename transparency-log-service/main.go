@@ -3,23 +3,25 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
-	"encoding/pem"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
 
+	"errors"
+
+	eddilithium2 "github.com/cloudflare/circl/sign/eddilithium2"
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -29,7 +31,7 @@ var (
 	addr        = flag.String("addr", ":8085", "HTTP listen address")
 	metricsAddr = flag.String("metrics-addr", ":9095", "Metrics listen address")
 	storageFile = flag.String("storage-file", "transparency.log", "Path to append-only log storage")
-	sthKeyFile  = flag.String("sth-key-file", "sth_key.pem", "Path to ECDSA P-256 private key for STH signing")
+	sthKeyFile  = flag.String("sth-key-file", "sth-pqc-key.bin", "Path to Dilithium2 private key (.bin) for STH signing")
 )
 
 // mutex to serialize writes to the transparency log file
@@ -44,7 +46,7 @@ type LogEntry struct {
 
 func main() {
 	flag.Parse()
-	sthKey, err := loadOrCreateKey(*sthKeyFile)
+	sthKey, err := loadOrCreatePqcKey(*sthKeyFile)
 	if err != nil {
 		logger, _ := zap.NewProduction()
 		sugar := logger.Sugar()
@@ -134,28 +136,42 @@ func addChainHandler(logger *zap.SugaredLogger) http.HandlerFunc {
 }
 
 // Helpers for STH generation and Merkle tree
-func loadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+// loadOrCreatePqcKey loads or creates a Dilithium2 key from a binary file.
+func loadOrCreatePqcKey(path string) (crypto.Signer, error) {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		// Generate new key
+		_, priv, err := eddilithium2.GenerateKey(rand.Reader)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to generate STH PQC key: %w", err)
 		}
-		der, err := x509.MarshalECPrivateKey(key)
+		data, err := priv.MarshalBinary()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to marshal STH PQC key: %w", err)
 		}
-		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
-		if err := ioutil.WriteFile(path, pemBytes, 0600); err != nil {
-			return nil, err
+		// Ensure directory exists
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return nil, fmt.Errorf("failed to create directory for STH PQC key: %w", err)
 		}
-		return key, nil
+		if err := ioutil.WriteFile(path+".tmp", data, 0600); err != nil {
+			return nil, fmt.Errorf("failed to write temp STH PQC key file: %w", err)
+		}
+		if err := os.Rename(path+".tmp", path); err != nil {
+			return nil, fmt.Errorf("failed to store STH PQC key file: %w", err)
+		}
+		return priv, nil
 	}
+
+	// Load existing key
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read STH PQC key file %s: %w", path, err)
 	}
-	block, _ := pem.Decode(data)
-	return x509.ParseECPrivateKey(block.Bytes)
+	priv := new(eddilithium2.PrivateKey)
+	if err := priv.UnmarshalBinary(data); err != nil {
+		return nil, fmt.Errorf("failed to parse STH PQC key from %s: %w", path, err)
+	}
+	return priv, nil
 }
 
 func computeLeaves() ([][]byte, error) {
@@ -247,7 +263,7 @@ func serializeSTHInput(timestamp, treeSize uint64, rootHash []byte) []byte {
 	return buf.Bytes()
 }
 
-func getSTHHandler(logger *zap.SugaredLogger, sthKey *ecdsa.PrivateKey) http.HandlerFunc {
+func getSTHHandler(logger *zap.SugaredLogger, sthKey crypto.Signer) http.HandlerFunc {
 	type STH struct {
 		TreeSize          uint64 `json:"tree_size"`
 		Timestamp         uint64 `json:"timestamp"`
@@ -265,13 +281,16 @@ func getSTHHandler(logger *zap.SugaredLogger, sthKey *ecdsa.PrivateKey) http.Han
 		timestamp := uint64(time.Now().UnixNano() / int64(time.Millisecond))
 		rootHash := computeRoot(leaves)
 		input := serializeSTHInput(timestamp, treeSize, rootHash)
-		hash := sha256.Sum256(input)
-		sigBytes, err := ecdsa.SignASN1(rand.Reader, sthKey, hash[:])
+
+		// Sign the raw input directly using the crypto.Signer interface
+		// Dilithium2 handles hashing internally.
+		sigBytes, err := sthKey.Sign(rand.Reader, input, crypto.Hash(0)) // Use crypto.Hash(0) for context-less Sign
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			logger.Errorf("failed to sign STH: %v", err)
 			return
 		}
+
 		sth := STH{
 			TreeSize:          treeSize,
 			Timestamp:         timestamp,

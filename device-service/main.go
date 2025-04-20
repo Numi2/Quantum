@@ -3,16 +3,18 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
-   "log"
-   "sync"
-   "time"
+	"log"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 )
 
 // service address
@@ -21,8 +23,8 @@ const addr = ":6000"
 var (
 	apiKey    string
 	caSignURL string
-   devices   = make(map[string]string)
-   devicesMu sync.Mutex
+	devices   = make(map[string]string)
+	devicesMu sync.Mutex
 )
 
 func main() {
@@ -35,18 +37,18 @@ func main() {
 		caSignURL = "http://localhost:5000/sign"
 	}
 
-   mux := http.NewServeMux()
-   mux.HandleFunc("/v1/devices", auth(provisionHandler))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/devices", auth(provisionHandler))
 
-   server := &http.Server{
-       Addr:         addr,
-       Handler:      mux,
-       ReadTimeout:  5 * time.Second,
-       WriteTimeout: 10 * time.Second,
-       IdleTimeout:  120 * time.Second,
-   }
-   log.Printf("Device Provisioning Service started on %s", addr)
-   log.Fatal(server.ListenAndServe())
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	log.Printf("Device Provisioning Service started on %s", addr)
+	log.Fatal(server.ListenAndServe())
 }
 
 // auth enforces X-API-Key header
@@ -62,12 +64,12 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 
 // provisionHandler processes a CSR and returns a device certificate chain
 func provisionHandler(w http.ResponseWriter, r *http.Request) {
-   if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-   defer r.Body.Close()
-   var req struct {
+	defer r.Body.Close()
+	var req struct {
 		CSR string `json:"csr"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -81,8 +83,38 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var pemBuf bytes.Buffer
 	pem.Encode(&pemBuf, &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-   client := &http.Client{Timeout: 10 * time.Second}
-   resp, err := client.Post(caSignURL, "application/x-pem-file", &pemBuf)
+
+	// BEGIN MODIFICATION: Configure HTTP client to trust PQC CA
+	caCertPath := os.Getenv("CA_CERT_FILE")
+	if caCertPath == "" {
+		caCertPath = "ca-cert.pem" // Default path
+	}
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		log.Printf("Error reading CA cert file %s: %v", caCertPath, err)
+		http.Error(w, "internal configuration error (CA cert)", http.StatusInternalServerError)
+		return
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertPEM) {
+		log.Printf("Error adding CA cert from %s to pool", caCertPath)
+		http.Error(w, "internal configuration error (CA cert pool)", http.StatusInternalServerError)
+		return
+	}
+	tlsConfig := &tls.Config{
+		RootCAs: pool,
+		// Add MinVersion and CurvePreferences if desired for client-side hardening
+		// MinVersion: tls.VersionTLS12,
+		// CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+	}
+	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   10 * time.Second,
+	}
+	// END MODIFICATION
+
+	resp, err := client.Post(caSignURL, "application/x-pem-file", &pemBuf)
 	if err != nil {
 		http.Error(w, "failed to call CA service", http.StatusInternalServerError)
 		return
@@ -103,9 +135,9 @@ func provisionHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to generate device ID", http.StatusInternalServerError)
 		return
 	}
-   devicesMu.Lock()
-   devices[deviceID] = string(certChain)
-   devicesMu.Unlock()
+	devicesMu.Lock()
+	devices[deviceID] = string(certChain)
+	devicesMu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{

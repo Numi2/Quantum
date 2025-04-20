@@ -38,6 +38,9 @@ func NewPKCS11KeyStore(dir string) (KeyStore, error) {
 
 // GetPrivateKey retrieves a crypto.Signer from the HSM by label
 func (s *PKCS11KeyStore) GetPrivateKey(id string) (crypto.PrivateKey, error) {
+	// TODO: PQC - Check if crypto11/HSM supports Dilithium2 key types and mechanisms.
+	// May need vendor-specific attributes or mechanisms.
+	// If keys are stored as CKO_DATA, custom retrieval and parsing logic is needed.
 	signer, err := s.ctx.FindKeyPair(nil, []byte(id))
 	if err != nil {
 		return nil, fmt.Errorf("pkcs11 find keypair '%s': %w", id, err)

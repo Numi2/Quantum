@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -39,7 +40,7 @@ func main() {
 	sbomPath := flag.String("sbom", "", "Path to SBOM JSON file to include")
 	provPath := flag.String("provenance", "", "Path to SLSA provenance JSON file to include")
 	server := flag.String("server", "http://localhost:7000", "Signing service URL")
-	algorithm := flag.String("algorithm", "ECDSA+Dilithium", "Signing algorithm")
+	algorithm := flag.String("algorithm", "Dilithium2", "Signing algorithm (Note: Service primarily uses Dilithium2)")
 	timeout := flag.Duration("timeout", 10*time.Second, "Request timeout (e.g., 5s, 1m)")
 	insecure := flag.Bool("insecure", false, "Skip TLS certificate verification")
 	versionFlag := flag.Bool("version", false, "Print version and exit")
@@ -99,12 +100,30 @@ func run(artifact, sbomPath, provPath, server, algorithm string, timeout time.Du
 		return fmt.Errorf("failed to marshal request payload: %w", err)
 	}
 
-	transport := http.DefaultTransport
+	// Default transport
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	var tlsConfig tls.Config
+
 	if insecure {
-		transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		log.Println("Warning: Skipping TLS verification.")
+		tlsConfig.InsecureSkipVerify = true
+	} else {
+		// Load CA certificate
+		caCertPath := "ca-cert.pem" // Default path, consider making this a flag if needed
+		caCertPEM, err := os.ReadFile(caCertPath)
+		if err != nil {
+			return fmt.Errorf("failed to read CA certificate %s: %w. Use --insecure to skip verification", caCertPath, err)
 		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCertPEM) {
+			return fmt.Errorf("failed to add CA certificate from %s to pool", caCertPath)
+		}
+		tlsConfig.RootCAs = pool
+		// Note: Add Client certs here if mTLS is required by the signing service
+		// tlsConfig.Certificates = ...
 	}
+
+	transport.TLSClientConfig = &tlsConfig
 	client := &http.Client{Transport: transport}
 
 	url := server + "/v1/signatures"
