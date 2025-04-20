@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -214,7 +215,7 @@ func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certifi
 		*/ // END MODIFICATION
 		// Assuming CRL fetched over trusted TLS connection to CA is sufficient for now.
 		// A full solution would require loading the CA's Dilithium2 public key and verifying here.
-		// crypto/x509 does not easily expose the raw signature for verification after parsing.
+		// crypto/x509 does not easily exposes the raw signature for verification after parsing.
 		log.Print("WARN: Skipping CRL signature verification due to PQC CA and standard library limitations.")
 
 		crlCache = newCRL
@@ -241,13 +242,28 @@ func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certifi
 		}
 	}
 
-	// If we are here, none of the presented certs were found in the CRL.
-	// We still rely on the standard TLS verification (verifiedChains) for trust path.
-	if len(verifiedChains) == 0 {
-		// This case should ideally not happen if ClientAuth requires verification,
-		// but good to double-check.
-		return errors.New("client certificate validation failed standard checks")
-	}
+	// ADDED PQC Verification: Verify leaf signature using CA PQC Pub Key
+	if len(verifiedChains) > 0 && len(verifiedChains[0]) > 0 {
+		leaf := verifiedChains[0][0]
+		// Load CA PQC Public Key (Consider caching this key)
+		caPqcPubKeyPath := filepath.Join(getEnv("KEY_DIR", "keys"), "ca-pqc-key.bin")
+		caPqcPubBytes, err := os.ReadFile(caPqcPubKeyPath)
+		if err != nil {
+			log.Printf("ERROR: Failed to read CA PQC public key %s for leaf verification: %v", caPqcPubKeyPath, err)
+			return fmt.Errorf("internal server error: could not load CA PQC key for verification")
+		}
+		caPqcPubKey := new(eddilithium2.PublicKey)
+		if err := caPqcPubKey.UnmarshalBinary(caPqcPubBytes); err != nil {
+			log.Printf("ERROR: Failed to parse CA PQC public key %s: %v", caPqcPubKeyPath, err)
+			return fmt.Errorf("internal server error: could not parse CA PQC key for verification")
+		}
+
+		if !eddilithium2.Verify(caPqcPubKey, leaf.RawTBSCertificate, leaf.Signature) {
+			log.Printf("WARN: PQC signature verification failed for client leaf certificate S/N %s", leaf.SerialNumber.String())
+			return errors.New("client certificate signature verification failed")
+		}
+		log.Printf("DEBUG: Client leaf certificate S/N %s PQC signature verified successfully", leaf.SerialNumber.String())
+	} // else: No verified chains, standard validation already failed or ClientAuth mode doesn't require it.
 
 	log.Printf("DEBUG: Client certificate S/N %s verified (not found in CRL)", verifiedChains[0][0].SerialNumber.String())
 	return nil // Certificate is not revoked according to the current CRL

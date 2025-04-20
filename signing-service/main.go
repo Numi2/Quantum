@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -248,6 +249,29 @@ func verifyClientCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certifi
 			}
 		}
 	}
+
+	// ADDED PQC Verification: Verify leaf signature using CA PQC Pub Key
+	if len(verifiedChains) > 0 && len(verifiedChains[0]) > 0 {
+		leaf := verifiedChains[0][0]
+		// Load CA PQC Public Key (Consider caching this key)
+		caPqcPubKeyPath := filepath.Join(getEnv("KEY_DIR", "keys"), "ca-pqc-key.bin") // Assumes CA key is stored as binary
+		caPqcPubBytes, err := os.ReadFile(caPqcPubKeyPath)
+		if err != nil {
+			sugar.Errorf("ERROR: Failed to read CA PQC public key %s for leaf verification: %v", caPqcPubKeyPath, err)
+			return fmt.Errorf("internal server error: could not load CA PQC key for verification")
+		}
+		caPqcPubKey := new(eddilithium2.PublicKey)
+		if err := caPqcPubKey.UnmarshalBinary(caPqcPubBytes); err != nil {
+			sugar.Errorf("ERROR: Failed to parse CA PQC public key %s: %v", caPqcPubKeyPath, err)
+			return fmt.Errorf("internal server error: could not parse CA PQC key for verification")
+		}
+
+		if !eddilithium2.Verify(caPqcPubKey, leaf.RawTBSCertificate, leaf.Signature) {
+			sugar.Warnf("WARN: PQC signature verification failed for client leaf certificate S/N %s", leaf.SerialNumber.String())
+			return errors.New("client certificate signature verification failed")
+		}
+		sugar.Debugf("DEBUG: Client leaf certificate S/N %s PQC signature verified successfully", leaf.SerialNumber.String())
+	} // else: No verified chains, standard validation already failed or ClientAuth mode doesn't require it.
 
 	// If we are here, none of the presented certs were found in the CRL.
 	// We still rely on the standard TLS verification (verifiedChains) for trust path.
